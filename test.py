@@ -4,32 +4,25 @@ from gymnasium.wrappers import Autoreset
 import torch
 from torch import Tensor
 import torch.nn as nn
-
-shared_net = nn.Sequential(
-    nn.LazyLinear(512),
-    nn.ReLU(),
-    nn.Linear(512,512),
-    nn.ReLU(),
-    nn.Linear(512,512),
-    nn.ReLU()
-)
+import torch.nn.functional as F
 
 class Actor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.shared_network = shared_net
+        self.l1 = nn.Linear(214,512)
+        self.l2 = nn.Linear(512,512)
+        self.l3 = nn.Linear(512,512)
         self.lmean = nn.Linear(512,9)
-        self.lstd = nn.Linear(512,9)
 
     def forward(self,obs:Tensor):
-        x = shared_net(obs)
-        mean = self.lmean(x)
-        eval_action = torch.tanh(mean)
+        x = F.relu(self.l1(obs))
+        x = F.relu(self.l2(x))
+        x = F.relu(self.l3(x))
+        eval_action = F.tanh(self.lmean(x))
         return eval_action
 
     def to(self,device="cpu"):
         self.to(device)
-
 
 env_configs = {
     "robots":["Panda"],
@@ -41,11 +34,11 @@ env_configs = {
 }
 
 def make_env():
-        x = suite.make(env_name ="PickPlace" ,**env_configs)
-        x = GymWrapper(x,keys=list(x.observation_spec()))
-        x.metadata = {"render_mode":[]}
-        x = Autoreset(x)
-        return x
+    x = suite.make(env_name ="PickPlace" ,**env_configs)
+    x = GymWrapper(x,keys=list(x.observation_spec()))
+    x.metadata = {"render_mode":[]}
+    x = Autoreset(x)
+    return x
 
 actor = Actor()
 env = make_env()
