@@ -5,6 +5,9 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings,logging
+warnings.filterwarnings("ignore")
+logging.disable(logging.CRITICAL)
 
 class Actor(nn.Module):
     def __init__(self):
@@ -30,21 +33,24 @@ env_configs = {
     "has_renderer":True,
     "use_camera_obs":False,
     "has_offscreen_renderer":False,
-    "horizon":50000, 
+    "reward_shaping":True,
+    "horizon":500, 
 }
 
 def make_env():
     x = suite.make(env_name ="PickPlace" ,**env_configs)
     x = GymWrapper(x,keys=list(x.observation_spec()))
     x.metadata = {"render_mode":[]}
-    x = Autoreset(x)
     return x
 
 actor = Actor()
 env = make_env()
 state,info = env.reset()
 for n in range(10_000):
-    state = torch.from_numpy(state).to(torch.float32) 
-    action = actor(state) 
+    st = torch.from_numpy(state).to(torch.float32) 
+    action = actor(st) 
     state,reward,done,info,trunc = env.step(action.detach().tolist())
+    if done:
+        state,info = env.reset()
+     
     env.render()
