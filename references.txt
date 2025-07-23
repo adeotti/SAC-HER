@@ -1,0 +1,6 @@
+Original paper : https://arxiv.org/abs/1812.05905
+
+https://github.com/pranz24/pytorch-soft-actor-critic
+
+original author's implementation (TensorFlow) : https://github.com/haarnoja/sac
+
