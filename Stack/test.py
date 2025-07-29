@@ -6,7 +6,7 @@ from torch.distributions import Normal
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
-import warnings,logging
+import warnings,logging,sys
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
 
@@ -31,7 +31,7 @@ class Actor(nn.Module):
         action = F.tanh(pre_tanh)
 
         log = dist.log_prob(pre_tanh).sum(-1,True)
-        log -= torch.log(1-action.pow(2) + 1e-9).sum(-1,True) # change of variable correction 
+        log -= torch.log(1-action.pow(2) + 1e-9).sum(-1,True)  
 
         eval_action = F.tanh(mean)
         return action,log,eval_action
@@ -47,6 +47,7 @@ env_configs = {
     "has_offscreen_renderer":False,
     "reward_shaping":True,
     "horizon":5000, 
+    "reward_scale":10.0
 }
 
 def make_env():
@@ -57,15 +58,15 @@ def make_env():
     return x
 
 actor = Actor()
-chk = torch.load("./model_100.pth",map_location="cpu")
-actor.load_state_dict(chk["actor state"],strict=True)
+#chk = torch.load("./model_60.pth",map_location="cpu")
+#actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
+
 state,info = env.reset()
 for n in range(10_000):
     st = torch.from_numpy(state).to(torch.float32) 
     _,_,action = actor(st) 
     state,reward,done,info,trunc = env.step(action.detach().tolist())
-    print(reward)
     if done:
         state,info = env.reset()
     env.render()
