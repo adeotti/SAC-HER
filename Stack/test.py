@@ -1,4 +1,5 @@
 import robosuite as suite
+from robosuite import load_composite_controller_config
 from robosuite.wrappers import GymWrapper
 from gymnasium.wrappers import Autoreset
 import torch
@@ -39,17 +40,19 @@ class Actor(nn.Module):
     def to(self,device="cpu"):
         self.to(device)
 
+cont_config = load_composite_controller_config(robot="Panda")
 env_configs = {
     "robots":["Panda"],
+    "controller_configs": cont_config,
     "gripper_types":["JacoThreeFingerDexterousGripper"],
     "has_renderer":True,
     "use_camera_obs":False,
     "has_offscreen_renderer":False,
-    "reward_shaping":True,
-    "horizon":5000, 
-    "reward_scale":10.0
+    "reward_shaping":True,               
+    "horizon":500,                        
+    "control_freq":20,
+    "reward_scale":2.0
 }
-
 def make_env():
     x = suite.make(env_name ="Stack" ,**env_configs)
     x = GymWrapper(x,keys=list(x.active_observables))
@@ -58,8 +61,8 @@ def make_env():
     return x
 
 actor = Actor()
-#chk = torch.load("./model_60.pth",map_location="cpu")
-#actor.load_state_dict(chk["actor state"],strict=True)
+chk = torch.load("./model_150.pth",map_location="cpu")
+actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
 
 state,info = env.reset()
