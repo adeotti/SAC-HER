@@ -61,7 +61,7 @@ def make_env():
     return x
 
 actor = Actor()
-chk = torch.load("./model_150.pth",map_location="cpu")
+chk = torch.load("./model_190.pth",map_location="cpu")
 actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
 
