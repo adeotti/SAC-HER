@@ -17,6 +17,8 @@ class Actor(nn.Module):
         self.l2 = nn.Linear(256,256)
         self.lmean = nn.Linear(256,9)
         self.lstd = nn.Linear(256,9)
+        #self.optim = torch.optim.Adam(self.parameters(),hypers.lr)
+        #self.apply(self.weights_init)
 
     def forward(self,obs:Tensor):
         x = F.relu(self.l1(obs))
@@ -26,7 +28,8 @@ class Actor(nn.Module):
         dist = Normal(mean,std) 
         pre_tanh = dist.rsample()
         action = F.tanh(pre_tanh)
-        log = dist.log_prob(pre_tanh) 
+        log = dist.log_prob(pre_tanh)
+        # change of variable correction 
         log -= torch.log(1-action.pow(2) + 1e-6)
         log = log.sum(-1,True)  
         return action,log,mean
@@ -51,8 +54,8 @@ def make_env():
     return x
 
 actor = Actor()
-#chk = torch.load("./model_15.pth",map_location="cpu")
-#actor.load_state_dict(chk["actor state"],strict=True)
+chk = torch.load("./model_12.pth",map_location="cpu")
+actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
 
 state,info = env.reset()
