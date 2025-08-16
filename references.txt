@@ -1,7 +1,9 @@
-Original paper : https://arxiv.org/abs/1812.05905
+Soft Actor-Critic Original paper : https://arxiv.org/abs/1812.05905
 
 original author's implementation (TensorFlow) : https://github.com/haarnoja/sac
 
 Pytorch implementation : https://github.com/pranz24/pytorch-soft-actor-critic
 
 Robosuite benchmark setup : https://github.com/ARISE-Initiative/robosuite-benchmark
+
+Hindsight Experience Replay original paper : https://arxiv.org/abs/1707.01495
