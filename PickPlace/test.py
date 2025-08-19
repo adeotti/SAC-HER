@@ -7,39 +7,57 @@ import torch.nn as nn
 from torch.distributions import Normal
 from torch.optim import Adam
 import torch.nn.functional as F
+from gymnasium.wrappers import Autoreset
+import random
+from gymnasium.spaces import Box,Dict
 
 class custom(gym.Wrapper):
     def __init__(self,env):
         super().__init__(env)
+        self.observation_space = Dict(
+            {
+            "observation" : Box(-np.inf,np.inf,(9,),np.float64),
+            "achieved_goal" : Box(-np.inf,np.inf,(3,),np.float64),
+            "desired_goal" : Box(-np.inf,np.inf,(3,),np.float64)
+            }
+        )
     
     def reset(self,**kwargs):
         obs,info = super().reset(**kwargs)
-        self.env.unwrapped.data.qpos[0] = .3 
-        self.env.unwrapped.data.qpos[1] = .5 
+        target = random.choice([True,True,False])
+        self.env.unwrapped.unwrapped.target_in_the_air = target
+        obs["observation"] = obs["observation"][:9]
+        self.env.unwrapped.data.qpos[0] = .3 # robot base x pos
+        self.env.unwrapped.data.qpos[1] = .5 # robot base y pos
+        # self.env.unwrapped.data.qpos[15]   # block's x pos
+        # self.env.unwrapped.data.qpos[16]   # block's y pos
         self.env.unwrapped.data.qpos[17] = .4
         return obs,info
 
     def step(self,action):
-        return super().step(action)
+        state,reward,done,trunc,info = super().step(action)
+        state["observation"] = state["observation"][:9]
+        return state,reward,done,trunc,info
 
 def process_obs(obs:dict):
-    observation = obs.get("observation")[:9]
+    observation = obs.get("observation")
     achieved_goal = obs.get("achieved_goal")
     desired_goal = obs.get("desired_goal")
     return torch.from_numpy(np.append(observation,(achieved_goal,desired_goal))).to(dtype=torch.float32)
 
 def make_env():
-    x = gym.make("FetchPickAndPlace-v3",max_episode_steps=100,render_mode="human")
+    x = gym.make("FetchPickAndPlaceDense-v3",max_episode_steps=100,render_mode="human")
     x = custom(x)
+    x = Autoreset(x)
     return x
-
+ 
 class policy(nn.Module):
     def __init__(self):
         super().__init__()
-        self.l1 = nn.Linear(15,128)
-        self.l2 = nn.Linear(128,128)
-        self.mean = nn.Linear(128,4)
-        self.std = nn.Linear(128,4)
+        self.l1 = nn.Linear(15,64)
+        self.l2 = nn.Linear(64,64)
+        self.mean = nn.Linear(64,4)
+        self.std = nn.Linear(64,4)
         self.optim = Adam(self.parameters(),lr=3e-4)
 
     def forward(self,obs):
@@ -56,12 +74,12 @@ class policy(nn.Module):
         return action,log,mean
     
 policyy = policy()
-policyy.load_state_dict(torch.load("./model.pth"))
+policyy.load_state_dict(torch.load("./model-900000.pth"))
 env = make_env()
 state = process_obs(env.reset()[0])
 for n in range(1000):
     action = policyy(state)[0]
     st,re,done,trunc,info = env.step(action.detach().numpy())
-    if trunc:
-        state = process_obs(env.reset()[0])
+    """if trunc:
+        state = process_obs(env.reset()[0])"""
     env.render()
