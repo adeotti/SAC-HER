@@ -7,3 +7,5 @@ Pytorch implementation : https://github.com/pranz24/pytorch-soft-actor-critic
 Robosuite benchmark setup : https://github.com/ARISE-Initiative/robosuite-benchmark
 
 Hindsight Experience Replay original paper : https://arxiv.org/abs/1707.01495
+
+OpenAI implementation : https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
