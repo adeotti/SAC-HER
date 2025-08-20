@@ -74,12 +74,10 @@ class policy(nn.Module):
         return action,log,mean
     
 policyy = policy()
-policyy.load_state_dict(torch.load("./model-900000.pth"))
+policyy.load_state_dict(torch.load("./model-600000.pth"))
 env = make_env()
 state = process_obs(env.reset()[0])
 for n in range(1000):
     action = policyy(state)[0]
     st,re,done,trunc,info = env.step(action.detach().numpy())
-    """if trunc:
-        state = process_obs(env.reset()[0])"""
     env.render()
