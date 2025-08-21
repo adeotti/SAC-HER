@@ -54,12 +54,12 @@ def make_env():
     return x
 
 actor = Actor()
-chk = torch.load("./model_12.pth",map_location="cpu")
+chk = torch.load("./data/model_16.pth",map_location="cpu")
 actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
 
 state,info = env.reset()
-for n in range(500):
+for n in range(50000):
     st = torch.from_numpy(state).to(torch.float32) 
     _,_,action = actor(st) 
     state,reward,done,info,trunc = env.step(env.action_space.sample()) # action.detach().tolist()
