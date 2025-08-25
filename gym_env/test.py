@@ -1,14 +1,12 @@
 import gymnasium as gym
-import gymnasium_robotics
+import gymnasium_robotics,torch,random
 gym.register_envs(gymnasium_robotics)
 import numpy as np
-import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.optim import Adam
 import torch.nn.functional as F
 from gymnasium.wrappers import Autoreset
-import random
 from gymnasium.spaces import Box,Dict
 
 class custom(gym.Wrapper):
@@ -27,10 +25,8 @@ class custom(gym.Wrapper):
         target = random.choice([True,True,False])
         self.env.unwrapped.unwrapped.target_in_the_air = target
         obs["observation"] = obs["observation"][:9]
-        self.env.unwrapped.data.qpos[0] = .3 # robot base x pos
-        self.env.unwrapped.data.qpos[1] = .5 # robot base y pos
-        # self.env.unwrapped.data.qpos[15]   # block's x pos
-        # self.env.unwrapped.data.qpos[16]   # block's y pos
+        self.env.unwrapped.data.qpos[0] = .3  
+        self.env.unwrapped.data.qpos[1] = .5  
         self.env.unwrapped.data.qpos[17] = .4
         return obs,info
 
@@ -46,7 +42,7 @@ def process_obs(obs:dict):
     return torch.from_numpy(np.append(observation,(achieved_goal,desired_goal))).to(dtype=torch.float32)
 
 def make_env():
-    x = gym.make("FetchPickAndPlaceDense-v3",max_episode_steps=100,render_mode="human")
+    x = gym.make("FetchPickAndPlace-v3",max_episode_steps=50,render_mode="human")
     x = custom(x)
     x = Autoreset(x)
     return x
@@ -74,10 +70,10 @@ class policy(nn.Module):
         return action,log,mean
     
 policyy = policy()
-policyy.load_state_dict(torch.load("./model-11.pth",map_location="cpu"))
+policyy.load_state_dict(torch.load("./model-1600000.pth",map_location="cpu"))
 env = make_env()
 state = process_obs(env.reset()[0])
 for n in range(1000):
     action = policyy(state)[0]
-    st,re,done,trunc,info = env.step(action.detach().numpy())
+    st,re,done,trunc,info = env.step(action.detach().numpy()) # env.action_space.sample()
     env.render()
