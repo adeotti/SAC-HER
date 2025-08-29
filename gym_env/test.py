@@ -70,7 +70,7 @@ class policy(nn.Module):
         return action,log,mean
     
 policyy = policy()
-policyy.load_state_dict(torch.load("./model-1600000.pth",map_location="cpu"))
+policyy.load_state_dict(torch.load("./model-8.pth",map_location="cpu"))
 env = make_env()
 state = process_obs(env.reset()[0])
 for n in range(1000):
