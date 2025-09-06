@@ -71,7 +71,7 @@ class Hypers:
     gamma = 0.99
     tau = 5e-3
     batch_size = 256
-    num_envs = 5
+    num_envs = 10
     horizon = 50
 
 hypers = Hypers()
@@ -79,8 +79,7 @@ hypers = Hypers()
 def weight_init(l):
     if isinstance(l,nn.Linear):
         torch.nn.init.orthogonal_(l.weight)
-        l.bias.data.fill_(0.0)
-
+        torch.nn.init.constant_(l.bias,0.0)
 
 class policy(nn.Module):
     def __init__(self):
