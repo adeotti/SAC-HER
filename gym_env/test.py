@@ -44,7 +44,6 @@ def process_obs(obs:dict):
 def make_env():
     x = gym.make("FetchPickAndPlace-v3",max_episode_steps=50,render_mode="human")
     x = custom(x)
-    x = Autoreset(x)
     return x
  
 class policy(nn.Module):
