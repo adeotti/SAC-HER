@@ -1,7 +1,7 @@
 import gymnasium as gym
 import gymnasium_robotics
 gym.register_envs(gymnasium_robotics)
-from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv 
 from gymnasium.wrappers import Autoreset
 from gymnasium.spaces import Box,Dict
 import numpy as np
@@ -62,8 +62,8 @@ def test_env():
 
 @dataclass()
 class Hypers:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    max_steps = int(2e6)+1 
+    device = torch.device("cpu")
+    max_steps = int(7e4)+1 
     lr = 3e-4
     action_dim = 4
     obs_dim = 15
@@ -71,7 +71,7 @@ class Hypers:
     gamma = 0.99
     tau = 5e-3
     batch_size = 256
-    num_envs = 10
+    num_envs = 190
     horizon = 50
 
 hypers = Hypers()
@@ -401,11 +401,12 @@ class main:
                     self.writter.add_scalar("Main/alpha loss",alpha_loss,n,new_style=True)
                     self.writter.add_scalar("Main/action variance",action.var(),n,new_style=True)
                     self.writter.add_scalar("Main/policy loss action variance",p_action.var(),n,new_style=True)
+                    self.writter.add_scalar("Main/policy loss action std",p_action.std(),n,new_style=True)
                     self.writter.add_scalar("Main/policy loss",policy_loss,n,new_style=True)
                     self.writter.add_scalar("Main/critic loss",q_loss,n,new_style=True)
                     self.writter.flush()
              
-                    if (n+1) % int(1e5) == 0:
+                    if (n+1) % int(1e4) == 0:
                         t+=1
                         self.save(t)
                         self.buffer.save()
@@ -413,6 +414,7 @@ class main:
                      
             torch.save(self.policy.state_dict(),f"./model-final.pth")
 
-
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.set_start_method("spawn",force=True)
     main().train(True)
