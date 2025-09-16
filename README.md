@@ -4,7 +4,7 @@ I implemented SAC+HER on the gymnasium Sparse reward environment and only SAC wi
 # gymnasium environment : 
 Contain the code for soft actor critic + Her algorithm implemented on [gymnasium robotics pick and place environment](https://robotics.farama.org/envs/fetch/pick_and_place). The base enviornment return a sparse binary reward and that's why I implemented HER(Hindsight Replay Experiement) since it works better for sparse reward environment. I wrote a custom class inheriting from Gym.wrapper to modify some attribute of the base environment and to be more specific, I've modified the initial position of the robot, the block on the table and how often the target is on the table and in the air. That last part is important because experiments proved that that pick and place environment is almost if not impossible to solve if the target is only always in the air like it's designed originally in the base gym robotics (HER original paper,footnote page 6)(I did also ran some test but couldn't solve it too when the target is always in the air). I also couldn't find any other way to modify how often the target appear in the air, the base environment doesn't provide any easy entry proint like a parameters in a method for example.
 
--  HER implementation details: 
+    -  HER implementation details: 
 Im using a thread safe Queue to prefetch the some training data from warmup phase to the queue and start pulling data from the Queue to avoid or reduce iddle time during training.Using threading her is important because sampling the HER batch are computationaly expensive and after some test, using a thread + queue combo for the data collection speedup the training by more than 5X.
 
 
@@ -27,7 +27,7 @@ sys.path.append(python file folder)
 import file_name # importing it will auto launch the training if main().train(True)
  ```
 
-Why I disabled autoreset[^1] for gym vectorized environment: 
+Why I disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for gym vectorized environment: 
 
 ```python 
 def vec_env():
@@ -54,4 +54,4 @@ Chack also the reference file for the references that helped me with this algori
 - [Robosuite benchmark setup](https://github.com/ARISE-Initiative/robosuite-benchmark)
 - [OpenAI SAC implementation](https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac)
 
-[^1]: [Gym Autoreset article for vectorized environments](https://farama.org/Vector-Autoreset-Mode)
+[^1]: [Gym Autoreset article for vectorized environments]
