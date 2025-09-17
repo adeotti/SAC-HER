@@ -24,7 +24,7 @@ class custom(gym.Wrapper):
         super().__init__(env)
         self.observation_space = Dict(
             {
-            "observation" : Box(-np.inf,np.inf,(9,),np.float64),
+            "observation" : Box(-np.inf,np.inf,(25,),np.float64),
             "achieved_goal" : Box(-np.inf,np.inf,(3,),np.float64),
             "desired_goal" : Box(-np.inf,np.inf,(3,),np.float64)
             }
@@ -34,7 +34,7 @@ class custom(gym.Wrapper):
         obs,info = super().reset(**kwargs)
         target = random.choice([True,False])
         self.env.unwrapped.unwrapped.target_in_the_air = target
-        obs["observation"] = obs["observation"][:9]
+        obs["observation"] = obs["observation"]
         self.env.unwrapped.data.qpos[0] = .3  # robot base x pos
         self.env.unwrapped.data.qpos[1] = .5  # robot base y pos
         # self.env.unwrapped.data.qpos[15]    # block's x pos
@@ -44,19 +44,19 @@ class custom(gym.Wrapper):
 
     def step(self,action):
         state,reward,done,trunc,info = super().step(action)
-        state["observation"] = state["observation"][:9]
+        state["observation"] = state["observation"]
         return state,reward,done,trunc,info
 
 def vec_env():
     def make_env():
-        x = gym.make("FetchPickAndPlace-v3",max_episode_steps=50)
+        x = gym.make("FetchPickAndPlace-v3",max_episode_steps=100)
         x = custom(x)
         x = Autoreset(x)
         return x
     return AsyncVectorEnv([make_env for _ in range(hypers.num_envs)])
 
 def test_env():
-    x = gym.make("FetchPickAndPlace-v3",max_episode_steps=50)
+    x = gym.make("FetchPickAndPlace-v3",max_episode_steps=100)
     x = custom(x)
     return x
 
@@ -71,8 +71,8 @@ class Hypers:
     gamma = 0.99
     tau = 5e-3
     batch_size = 256
-    num_envs = 190
-    horizon = 50
+    num_envs = 400
+    horizon = 100
 
 hypers = Hypers()
 
@@ -128,12 +128,12 @@ def process_obs(obs:dict):
     output = torch.from_numpy(
         np.concatenate([observation,achieved_goal,desired_goal],axis=-1) 
     )
-    assert output.shape == torch.Size([hypers.num_envs,15]) or output.shape == torch.Size([15]),f"-->> {output.shape}"
+    assert output.shape == torch.Size([hypers.num_envs,31]) or output.shape == torch.Size([31]),f"-->> {output.shape}"
     return output.to(device=hypers.device,dtype=torch.float32)  
 
 def process_her_states(observation,achieved_goal,desired_goal):
     output = torch.from_numpy(np.concatenate([observation,achieved_goal,desired_goal],axis=-1))
-    assert output.shape == torch.Size([hypers.num_envs,15]) 
+    assert output.shape == torch.Size([hypers.num_envs,31]) 
     return output.to(device=hypers.device)
 
 def her_reward(goal_a,goal_b):
