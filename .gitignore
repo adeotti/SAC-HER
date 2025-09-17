@@ -1,11 +1,11 @@
-data/
-
+gym_env/pickplace_copy.ipynb
+gym_env/pickplace.ipynb
+gym_env/pick_place.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
-
 *.so
 
 # Distribution / packaging
