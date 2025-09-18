@@ -2,17 +2,21 @@ Implementation of SAC and HER algorithm on two different environments with diffe
 
 
 **Gymnasium environment**
+
 Contain the code for soft actor critic + Her algorithm implemented on [gymnasium robotics pick and place environment](https://robotics.farama.org/envs/fetch/pick_and_place). The base environment produces a sparse binary reward, and that's why I implemented HER(Hindsight Replay Experiement) since it works better for sparse reward environment. I wrote a custom class inheriting from Gym.wrapper to modify some attributes of the base environment, and to be more specific, I've modified the initial position of the robot, the block on the table, and how often the target is on the table and in the air. That last part is important because experiments proved that that pick and place environment is almost if not impossible to solve if the target is only always in the air like it's designed originally in the base gym robotics (HER original paper, footnote page 6)(I did also ran some test but couldn't solve it too when the target is always in the air). I also couldn't find any other way to modify how often the target appears in the air; the base environment doesn't provide any easy entry point like a parameter in a method, for example.
 
 - **HER implementation details**
+
 I'm using a thread-safe Queue to prefetch some training data from the warmup phase to the queue and start pulling data from it to avoid or reduce idle time during training. Using threading here is important from what i saw because sampling the HER batches is computationally expensive, and after some tests, using a thread + queue combo for the data collection sped the training by more than 5X.
 
 
 **Robosuite environment**
+
 Contain the code for SAC but on top of the [robosuite Stack environment](https://robosuite.ai/docs/modules/environments.html#block-stacking) using the Panda robot and with three three-finger dexterous gripper. The goal for the Stack environment is to stack two blocks on top of one another. I use a dense reward version of that environment for my implementation. For the second environment, Lift, the goal is the same as the early gym pick and place environment in the gym env folder; the only real difference is the observation space (much larger here than in gym, mostly because the robot is more complex and the gripper is also different)
 
 
 **Training and Vectorization method (trained on kaggle)**
+
 I use sync mode with disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for both gym and Robosuite environments instead of the async method because, after running many tests, the asynchronous method just doesn't work in the Jupyter environment for both environments. One way to use Async mode is to convert the notebooks to Python, then import that file as a dataset and run the code with Python's built-in exec function. Another, more straightforward method might be to add the path of the Python file to the system using sys. Also, Async vectorization mode does not work in the Robosuite environment; it only works with the Gym environment.
 
 ```python
