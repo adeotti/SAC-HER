@@ -36,10 +36,10 @@ def make_env():
 class policy(nn.Module):
     def __init__(self):
         super().__init__()
-        self.l1 = nn.Linear(31,64)
-        self.l2 = nn.Linear(64,64)
-        self.mean = nn.Linear(64,4)
-        self.std = nn.Linear(64,4)
+        self.l1 = nn.Linear(31,256)
+        self.l2 = nn.Linear(256,256)
+        self.mean = nn.Linear(256,4)
+        self.std = nn.Linear(256,4)
         self.optim = Adam(self.parameters(),lr=3e-4)
 
     def forward(self,obs):
@@ -61,7 +61,7 @@ env = make_env()
 state = env.reset()[0] 
 for n in range(10000):
     _,_,action = policyy(process_obs(state))
-    st,re,done,trunc,info = env.step(action.detach().numpy()) 
+    st,re,done,trunc,info = env.step(action.detach().numpy())
     if trunc:
         state = env.reset()[0] 
     state = st
