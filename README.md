@@ -17,7 +17,7 @@ Contain the code for SAC but on top of the [robosuite Stack environment](https:/
 
 I use sync mode with disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for both gym and Robosuite environments instead of the async method because, after running many tests, the asynchronous method just doesn't work in the Jupyter environment for both environments. One way to use Async mode is to convert the notebooks to Python, then import that file as a dataset and run the code with Python's built-in exec function. Another, more straightforward method might be to add the path of the Python file to the system using sys. Also, Async vectorization mode does not work in the Robosuite environment; it only works with the Gym environment.
 
-I disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for the vectorized gymnasium environment because the reward with auto reset mode set to "next steps" yields 0.0 at the first step of each reset episode, which might lead to some instability during training since the environment gives a positive reward even though it is not solved. A way to avoid that issue that i found is to manually reset the done environments. I did not disabled autorest for the vectorized Robosuite environment because the reward function returns dense rewards.
+I used disabled autoreset for the vectorized gymnasium environment because the reward with auto reset mode set to "next steps" yields 0.0 at the first step of each reset episode, which might lead to some instability during training since the environment gives a positive reward even though it is not solved. A way to avoid that issue that i found is to manually reset the done environments. I did not disabled autorest for the vectorized Robosuite environment because the reward function returns dense rewards.
 
 ```python
 # .py file kaggle training methods
@@ -36,12 +36,10 @@ import file_name # importing it will auto launch the training if main().train(Tr
 1. [Soft Actor-Critic paper 1 (2018)](https://arxiv.org/abs/1801.01290)
 2. [Soft Actor-Critic paper 2 (2019)](https://arxiv.org/abs/1812.05905)
 3. [Hindsight Experience Replay paper](https://arxiv.org/abs/1707.01495)
-
 4. [SAC author's implementation (TensorFlow)](https://github.com/haarnoja/sac)
 5. [OpenAI SAC implementation (Pytorch)](https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac)
 6. [Useful SAC implementation 2 (Pytorch) ](https://github.com/pranz24/pytorch-soft-actor-critic)
 7. [Useful SAC implementation 3 (Pytorch)](https://github.com/denisyarats/pytorch_sac/tree/master)
-
 8. [Robosuite benchmark setup](https://github.com/ARISE-Initiative/robosuite-benchmark)
 
 
