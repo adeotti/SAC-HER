@@ -35,8 +35,9 @@ I disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for the vectori
 2. [Soft Actor-Critic paper 2 (2019)](https://arxiv.org/abs/1812.05905)
 3. [Hindsight Experience Replay paper](https://arxiv.org/abs/1707.01495)
 4. [SAC author's implementation (TensorFlow)](https://github.com/haarnoja/sac)
-5. [Useful SAC (Pytorch) implementation](https://github.com/pranz24/pytorch-soft-actor-critic)
-6. [Robosuite benchmark setup](https://github.com/ARISE-Initiative/robosuite-benchmark)
-7. [OpenAI SAC implementation (Pytorch)](https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac)
+5. [Robosuite benchmark setup](https://github.com/ARISE-Initiative/robosuite-benchmark)
+6. [OpenAI SAC implementation (Pytorch)](https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac)
+7. [Useful SAC implementation 2 (Pytorch) ](https://github.com/pranz24/pytorch-soft-actor-critic)
+8. [Useful SAC implementation 3 (Pytorch)](https://github.com/denisyarats/pytorch_sac/tree/master)
 
 
