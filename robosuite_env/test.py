@@ -14,7 +14,7 @@ class Actor(nn.Module):
         super().__init__()
         self.l1 = nn.Linear(148,1024)
         self.l2 = nn.Linear(1024,1024)
-        self.l3 = nn.Linear(512,512)
+        self.l3 = nn.Linear(1024,512)
         self.lmean = nn.Linear(512,9)
         self.lstd = nn.Linear(512,9)
         
@@ -53,16 +53,16 @@ def make_env():
     return x
 
 actor = Actor()
-chk = torch.load("./data/5.pth",map_location="cpu")
+chk = torch.load("./data/9.pth",map_location="cpu")
 actor.load_state_dict(chk["actor state"],strict=True)
 env = make_env()
+zscore = lambda x : (x-x.mean())/(x.std()+1e-6)
 
 state,info = env.reset()
 for n in range(2000):
-    st = torch.from_numpy(state).to(torch.float32) 
+    st = zscore(torch.from_numpy(state).to(torch.float32))
     _,_,action = actor(st) 
-    state,reward,done,info,trunc = env.step(action.detach().numpy()) 
-    st = state
+    state,reward,done,info,trunc = env.step(env.action_space.sample()) 
     env.render()
     if done:
         state = env.reset()[0]
