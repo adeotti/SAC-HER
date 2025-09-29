@@ -1,4 +1,4 @@
-Implementation of SAC+HER on the Gym Robotics Fetch pick and place sparse reward environment and SAC without HER on the Robosuite Stack dense reward environment.
+Implementation of SAC+HER on the Gym Robotics Fetch pick and place sparse reward environment and SAC without HER on the  Gym robotics Fetch Reach Dense rewards environment and the Robosuite Stack dense reward environment.
 
 
 ***Gymnasium environment : SAC + HER***
@@ -15,22 +15,9 @@ Contain the code for SAC but on top of the [robosuite Stack environment](https:/
 
 ***Training and Vectorization method (trained on kaggle)***
 
-I use sync mode with disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for both gym and Robosuite environments instead of the async method because, after running many tests, the asynchronous method just doesn't work in the Jupyter environment for both environments. One way to use Async mode is to convert the notebooks to Python, then import that file as a dataset and run the code with Python's built-in exec function. Another, more straightforward method might be to add the path of the Python file to the system using sys. Also, Async vectorization mode does not work in the Robosuite environment; it only works with the Gym environment.
+I use sync mode with disabled [autoreset](https://farama.org/Vector-Autoreset-Mode) for both gym and Robosuite environments instead of the async method because, after running many tests, the asynchronous method just doesn't work in the Jupyter environment for both environments. One way to use Async mode is to convert the notebooks to a  Python file, then import that file as a dataset and run the code with Python's built-in exec function.Another, more straightforward method might be to add the path of the Python file to the system using sys (And those two method only work with the Gym env, not with the Robosuite env)
 
 I used disabled autoreset for the vectorized gymnasium environment because the reward with auto reset mode set to "next steps" yields 0.0 at the first step of each reset episode, which might lead to some instability during training since the environment gives a positive reward even though it is not solved. A way to avoid that issue that i found is to manually reset the done environments. I did not disabled autorest for the vectorized Robosuite environment because the reward function returns dense rewards.
-
-```python
-# .py file kaggle training methods
-
-with open(python file path,"r") as file: # method 1 
-    code = file.read()
-    exec(code)
-
-import sys # method 2 
-sys.path.append(python file folder)
-import file_name # importing it will auto launch the training if main().train(True)  
- ```
-
 
 ***Training logs***
 
