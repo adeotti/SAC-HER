@@ -32,13 +32,13 @@ class Hypers:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
-    batchsize = 256
+    batchsize = 1024
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = int(5e4)
+    warmup = int(2e4)
     max_steps = int(5e6)
-    num_envs = 2
+    num_envs = 10
     horizon = 500
 
 hypers = Hypers()
@@ -177,7 +177,6 @@ class buffer:
         else:
             self.norm_obs = self.normalize(self.obs,self.obs_rms)
             action,_,_ = self.policy(self.norm_obs)
-            sys.exit(action)
             action = action.squeeze()
           
         nx_state,reward,done,_,_ = self.env.step(action.tolist())
