@@ -31,13 +31,13 @@ class Hypers:
     env_name = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     obs_dim = 162       # observation space, dim -1  
-    action_dim = 9    # action space for a single env
+    action_dim = 9      # action space for a single env
     batchsize = 256
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = 10#int(5e4)
-    max_steps = 100#int(5e6)
+    warmup = int(5e4)
+    max_steps = int(5e6)
     num_envs = 2
     horizon = 500
 
@@ -94,7 +94,7 @@ class Actor(nn.Module):
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
-        std = self.lstd(x).clamp(-20,2).exp()
+        std = self.lstd(x).clamp(-5,2).exp()
         dist = Normal(mean,std) 
         
         pre_tanh = dist.rsample()
@@ -108,17 +108,17 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self):
         super().__init__()
-        self.l1 = nn.Linear(hypers.obs_dim + hypers.action_dim,256)
-        self.l2 = nn.Linear(256,256)
-        self.l3 = nn.Linear(256,256)
-        self.output = nn.Linear(256,1)
+        self.l1 = nn.Linear(hypers.obs_dim + hypers.action_dim,512)
+        self.l2 = nn.Linear(512,512)
+        self.l3 = nn.Linear(512,512)
+        self.output = nn.Linear(512,1)
         self.apply(weight_init)
 
     def forward(self,obs,action):
         cat = torch.cat((obs,action),dim=-1)
-        x = F.relu(self.l1(cat))
-        x = F.relu(self.l2(x))
-        x = F.relu(self.l3(x))
+        x = F.silu(self.l1(cat))
+        x = F.silu(self.l2(x))
+        x = F.silu(self.l3(x))
         x = self.output(x)
         return x
 
