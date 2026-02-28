@@ -34,8 +34,8 @@ class Hypers:
     ROBOT = "Panda"
     env_name = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    obs_dim = None       # observation space, dim -1  
-    action_dim = None    # action space for a single env
+    obs_dim = 149       # observation space, dim -1  
+    action_dim = 9    # action space for a single env
     batchsize = 256
     lr = 3e-4
     gamma = .99
@@ -46,8 +46,7 @@ class Hypers:
     horizon = 500
     gripper = []
     
-hypers = Hypers()
-
+    
 cont_config = load_composite_controller_config(robot=hypers.ROBOT)
 env_configs = {
     "robots":[hypers.ROBOT],
@@ -60,43 +59,15 @@ env_configs = {
     "horizon":hypers.horizon,          # Max steps before reset or trunc = True
     "control_freq":20,
     "reward_scale":1.0
-}
-
-def Lift_one():
-    hypers.env_name = "Lift"
-    hypers.gripper.clear()
-    hypers.gripper.append("PandaGripper")
-    hypers.obs_dim = 106
-    hypers.action_dim = 7
-    return "Lift"
-
-def Lift_two():
-    hypers.env_name = "Lift"
-    hypers.gripper.clear()
-    hypers.gripper.append("JacoThreeFingerDexterousGripper")
-    hypers.obs_dim = 106
-    hypers.action_dim = 9
-    return "Lift"
-
-def Stack_one():
-    hypers.env_name = "Stack"
-    hypers.gripper.clear()
-    hypers.gripper.append("PandaGripper")
-    hypers.obs_dim = 148
-    hypers.action_dim = 7
-    return "Stack"
-
-def Stack_two():
-    hypers.env_name = "Stack"
-    hypers.gripper.clear()
-    hypers.gripper.append("JacoThreeFingerDexterousGripper")
-    hypers.obs_dim = 148
-    hypers.action_dim = 9
-    return "Stack"
 
 def vec_env():
     def make_env():
-        x = suite.make(Lift_one() ,**env_configs)
+        x = suite.make(
+            env_name = "Stack"
+            gripper_types = "JacoThreeFingerDexterousGripper",
+            horizon = hypers.horizon,
+            **env_configs
+        )
         x = GymWrapper(x,list(x.observation_spec()))
         x.metadata = {"render_mode":[]}
         try:
@@ -106,13 +77,6 @@ def vec_env():
         return x
     return SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
 
-
-def test_env():
-    env_configs["has_renderer"] = True
-    x = suite.make(env_name = Lift_one() ,**env_configs)
-    x = GymWrapper(x,list(x.observation_spec()))
-    x.metadata = {"render_mode":[]}
-    return x
 
 
 def weight_init(l):
@@ -325,7 +289,9 @@ class main:
         if start:
             self.load() 
             n = 0 
-            alpha = self.log_alpha.exp() if self.entropy_tune else torch.tensor([0.2],dtype=torch.float32,device=hypers.device)
+            alpha = self.log_alpha.exp() if self.entropy_tune \
+                    else torch.tensor([0.2],dtype=torch.float32,device=hypers.device)
+            
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
                 if not self.buffer.pointer == hypers.max_steps:
                     self.buffer.step()
@@ -337,11 +303,15 @@ class main:
         
                     with torch.no_grad():
                         nx_actions,log_nx_actions,_ = self.actor(nx_states)
-                        min_q_target = torch.min(self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions) ) 
+                        min_q_target = torch.min(
+                                self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                        ) 
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha*log policy(at|st))
 
-                    critic_loss = F.mse_loss(self.q1(states,actions),q_target) + F.mse_loss(self.q2(states,actions) ,q_target)
+                    critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
+                    critic_loss += F.mse_loss(self.q2(states,actions),q_target)
+
                     self.critic_optim.zero_grad(set_to_none=True)
                     critic_loss.backward()
                     torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
@@ -397,32 +367,37 @@ class main:
                         self.writter.flush()
                      
 
-class Test:
-    def __init__(self):
-        self.env = test_env()
-        self.policy = Actor()
-        checkpoint = torch.load("./data/833.pth",map_location=hypers.device)
-        self.policy.load_state_dict(checkpoint["actor state"],strict=True)
-        self.obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
-    
-    def normalize(self,obs,obs_rms:RunningMeanStd):
-        mean = torch.from_numpy(obs_rms.mean)
-        std = torch.from_numpy(obs_rms.var).sqrt() 
-        output = (obs - mean) / (std + 1e-8)
-        return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32)
 
-    def run(self,start=False):
-        if start:
-            state,info = self.env.reset()
-            for n in range(2000):
-                st = torch.from_numpy(state).to(torch.float32)
-                _,_,action = self.policy(self.normalize(st,self.obs_rms))
-                state,reward,done,info,trunc = self.env.step(action.detach().numpy()) 
-                self.env.render()
-                if done:
-                    state = self.env.reset()[0]
 
 
 if __name__ == "__main__":
-    main().train(False)
-    Test().run(True)
+"""
+#main().train(False)
+#Test().run(True)
+
+import numpy as np
+
+import robosuite as suite
+import gymnasium as gym
+
+# create environment instance
+env = suite.make(
+    env_name="Stack", # try with other tasks like "Stack" and "Door"
+    robots="Panda",  # try with other robots like "Sawyer" and "Jaco"
+    gripper_types="JacoThreeFingerDexterousGripper",
+    has_renderer=True,
+    has_offscreen_renderer=False,
+    use_camera_obs=False,
+)
+
+# reset the environment
+env.reset()
+
+for i in range(1000):
+    action = np.random.randn(*env.action_spec[0].shape) * 0.1
+    obs, reward, done, info = env.step(action)  # take action in the environment
+    env.render()  # render on display
+    
+
+
+
