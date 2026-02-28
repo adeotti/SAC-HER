@@ -6,23 +6,21 @@ try:
     from gymnasium.wrappers import AutoResetWrapper
 except ImportError:
     from gymnasium.wrappers import Autoreset
-import torch,sys
-from dataclasses import dataclass
-from IPython.display import clear_output
 
-from torch import Tensor
+import torch,sys
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.optim import Adam
+from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
 from stable_baselines3.common.running_mean_std import RunningMeanStd
-
 from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
-from torch.utils.tensorboard import SummaryWriter
+from dataclasses import dataclass
+
 
 import warnings,logging
 warnings.filterwarnings("ignore")
@@ -40,9 +38,9 @@ class Hypers:
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = int(5e4)
-    max_steps = int(5e6)
-    num_envs = 8
+    warmup = 100#int(5e4)
+    max_steps = 1000#int(5e6)
+    num_envs = 10
     horizon = 500
     gripper = []
     
@@ -59,11 +57,12 @@ env_configs = {
     "horizon":hypers.horizon,          # Max steps before reset or trunc = True
     "control_freq":20,
     "reward_scale":1.0
+    }
 
 def vec_env():
     def make_env():
         x = suite.make(
-            env_name = "Stack"
+            env_name = "Stack",
             gripper_types = "JacoThreeFingerDexterousGripper",
             horizon = hypers.horizon,
             **env_configs
@@ -77,13 +76,10 @@ def vec_env():
         return x
     return SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
 
-
-
 def weight_init(l):
     if isinstance(l,nn.Linear):
         torch.nn.init.orthogonal_(l.weight)
         torch.nn.init.constant_(l.bias,0.0)
-
 
 class Actor(nn.Module):
     def __init__(self):
@@ -96,7 +92,7 @@ class Actor(nn.Module):
         self.apply(weight_init)
         self.optim = Adam(self.parameters(),hypers.lr)
 
-    def forward(self,obs:Tensor):
+    def forward(self,obs):
         x = F.relu(self.l1(obs))
         x = F.relu(self.l2(x))
         x = F.relu(self.l3(x))
@@ -120,7 +116,7 @@ class Critic(nn.Module):
         self.output = nn.Linear(256,1)
         self.apply(weight_init)
 
-    def forward(self,obs:Tensor,action:Tensor):
+    def forward(self,obs,action):
         cat = torch.cat((obs,action),dim=-1)
         x = F.relu(self.l1(cat))
         x = F.relu(self.l2(x))
@@ -242,9 +238,9 @@ class main:
         self.q1_target = deepcopy(self.q1).to(hypers.device)
         self.q2_target = deepcopy(self.q2).to(hypers.device)
 
-        self.actor.compile()
-        self.q1.compile()
-        self.q2.compile()
+        #self.actor.compile()
+        #self.q1.compile()
+        #self.q2.compile()
 
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
@@ -345,7 +341,7 @@ class main:
                     for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
                         q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
                         
-                    if traj != 0 and traj%int(5e3) == 0 :
+                    if traj%int(5e3) == 0 :
                         n+=1
                         self.save(n)
                         self.buffer.save() 
@@ -370,5 +366,5 @@ class main:
                     self.writter.add_scalar("Main/policy loss action variance",new_action.var(),traj)
                      
 if __name__ == "__main__":
-    #main().train(False)
-    #Test().run(True)
+    main().train(True)
+    
