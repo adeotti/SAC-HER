@@ -21,35 +21,33 @@ from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
 
-
 import warnings,logging
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
-clear_output()
 
 @dataclass(frozen=False)
 class Hypers:
     ROBOT = "Panda"
     env_name = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    obs_dim = 149       # observation space, dim -1  
+    obs_dim = 162       # observation space, dim -1  
     action_dim = 9    # action space for a single env
     batchsize = 256
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = 100#int(5e4)
-    max_steps = 1000#int(5e6)
-    num_envs = 10
+    warmup = 10#int(5e4)
+    max_steps = 100#int(5e6)
+    num_envs = 2
     horizon = 500
-    gripper = []
-    
+
+hypers = Hypers()
     
 cont_config = load_composite_controller_config(robot=hypers.ROBOT)
 env_configs = {
-    "robots":[hypers.ROBOT],
+    "robots":"Panda",
     "controller_configs": cont_config,
-    "gripper_types":hypers.gripper,
+    "gripper_types":"JacoThreeFingerDexterousGripper",
     "has_renderer":False,
     "use_camera_obs":False,
     "has_offscreen_renderer":False,
@@ -63,8 +61,6 @@ def vec_env():
     def make_env():
         x = suite.make(
             env_name = "Stack",
-            gripper_types = "JacoThreeFingerDexterousGripper",
-            horizon = hypers.horizon,
             **env_configs
         )
         x = GymWrapper(x,list(x.observation_spec()))
@@ -84,21 +80,23 @@ def weight_init(l):
 class Actor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.l1 = nn.Linear(hypers.obs_dim,256)
-        self.l2 = nn.Linear(256,256)
-        self.l3 = nn.Linear(256,256)
-        self.lmean = nn.Linear(256,hypers.action_dim)
-        self.lstd = nn.Linear(256,hypers.action_dim)
+        self.l1 = nn.Linear(hypers.obs_dim,512)
+        self.l2 = nn.Linear(512,512)
+        self.l3 = nn.Linear(512,512)
+        self.l_mean = nn.Linear(512,hypers.action_dim)
+        self.l_std = nn.Linear(512,hypers.action_dim)
         self.apply(weight_init)
         self.optim = Adam(self.parameters(),hypers.lr)
 
     def forward(self,obs):
-        x = F.relu(self.l1(obs))
-        x = F.relu(self.l2(x))
-        x = F.relu(self.l3(x))
-        mean = self.lmean(x)
+        x = F.silu(self.l1(obs))
+        x = F.silu(self.l2(x))
+        x = F.silu(self.l3(x))
+        
+        mean = self.l_mean(x)
         std = self.lstd(x).clamp(-20,2).exp()
         dist = Normal(mean,std) 
+        
         pre_tanh = dist.rsample()
         action = F.tanh(pre_tanh)
         log = dist.log_prob(pre_tanh)
@@ -179,6 +177,7 @@ class buffer:
         else:
             self.norm_obs = self.normalize(self.obs,self.obs_rms)
             action,_,_ = self.policy(self.norm_obs)
+            sys.exit(action)
             action = action.squeeze()
           
         nx_state,reward,done,_,_ = self.env.step(action.tolist())
@@ -227,7 +226,6 @@ class buffer:
         return self.norm_obs.mean(),self.norm_obs.std(),self.log_reward.mean()
 
 
-
 class main:
     def __init__(self):
         self.actor = Actor().to(hypers.device)
@@ -238,9 +236,9 @@ class main:
         self.q1_target = deepcopy(self.q1).to(hypers.device)
         self.q2_target = deepcopy(self.q2).to(hypers.device)
 
-        #self.actor.compile()
-        #self.q1.compile()
-        #self.q2.compile()
+        self.actor.compile()
+        self.q1.compile()
+        self.q2.compile()
 
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
