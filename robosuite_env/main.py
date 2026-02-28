@@ -234,23 +234,27 @@ class buffer:
 
 class main:
     def __init__(self):
-        self.env = vec_env()
-        self.actor = Actor().to(hypers.device) ; self.actor.compile()
-        self.q1 = Critic().to(hypers.device)   ; self.q1.compile()
-        self.q2 = Critic().to(hypers.device)   ; self.q2.compile()
+        self.actor = Actor().to(hypers.device)
+
+        self.q1 = Critic().to(hypers.device)
+        self.q2 = Critic().to(hypers.device)
+
         self.q1_target = deepcopy(self.q1).to(hypers.device)
         self.q2_target = deepcopy(self.q2).to(hypers.device)
+
+        self.actor.compile()
+        self.q1.compile()
+        self.q2.compile()
+
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
-        self.entropy_tune = False #True
         self.entropy_target = -hypers.action_dim
         self.log_alpha = torch.tensor(0.0,requires_grad=True,device=hypers.device)  
         self.alpha_optim = Adam([self.log_alpha],lr=hypers.lr)
-
+        
+        self.env = vec_env()
         self.buffer = buffer(self.env,self.actor)
         self.writter = SummaryWriter("./")
-        self.params = {}
-        self.print_graph = False
     
     def save(self,step):
         check = {
@@ -289,8 +293,8 @@ class main:
         if start:
             self.load() 
             n = 0 
-            alpha = self.log_alpha.exp() if self.entropy_tune \
-                    else torch.tensor([0.2],dtype=torch.float32,device=hypers.device)
+            #alpha = self.log_alpha.exp() for entropy autotune 
+            alpha = torch.tensor([0.2],dtype=torch.float32,device=hypers.device)
             
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
                 if not self.buffer.pointer == hypers.max_steps:
@@ -326,21 +330,22 @@ class main:
                     torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                     self.actor.optim.step()
 
-                    if self.entropy_tune:
-                        alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
-                        self.alpha_optim.zero_grad(set_to_none=True)
-                        alpha_loss.backward()
-                        self.alpha_optim.step()
-                        alpha = self.log_alpha.exp()
-                    else:
-                        alpha_loss = 0
+                    """ # Entropy auto tune
+                    alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
+                    self.alpha_optim.zero_grad(set_to_none=True)
+                    alpha_loss.backward()
+                    self.alpha_optim.step()
+                    alpha = self.log_alpha.exp()
+                    self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
+                    """
                    
                     for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
                         q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
+                    
                     for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
                         q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
                         
-                    if traj != 0 and traj%int(5e3) == 0 : 
+                    if traj != 0 and traj%int(5e3) == 0 :
                         n+=1
                         self.save(n)
                         self.buffer.save() 
@@ -348,56 +353,22 @@ class main:
                     if self.buffer.pointer == hypers.max_steps:
                         self.buffer.save()
                     
-                    if (traj+1) % hypers.horizon/2==0:
-                        coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
-                        self.writter.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj,new_style=True)
-                        self.writter.add_scalar("Norm/Collection obs std",coll_obs_std,traj,new_style=True)
-                        self.writter.add_scalar("Main/Collection rewards",coll_reward,traj,new_style=True)
-                        self.writter.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj,new_style=True)
-                        self.writter.add_scalar("Norm/training state mean",states.mean(),traj,new_style=True)
-                        self.writter.add_scalar("Norm/training state std",states.std(),traj,new_style=True)
-                        self.writter.add_scalar("Norm/training nx state mean",nx_states.mean(),traj,new_style=True)
-                        self.writter.add_scalar("Norm/training nx state std",nx_states.std(),traj,new_style=True)
-                        self.writter.add_scalar("Main/entropy loss",alpha_loss,traj,new_style=True)
-                        self.writter.add_scalar("Main/loss Policy",policy_loss,traj,new_style=True)
-                        self.writter.add_scalar("Main/alpha value",alpha,traj,new_style=True)
-                        self.writter.add_scalar("Main/critic Loss",critic_loss,traj,new_style=True)
-                        self.writter.add_scalar("Main/action variance",actions.var(),traj,new_style=True)
-                        self.writter.add_scalar("Main/policy loss action variance",new_action.var(),traj,new_style=True)
-                        self.writter.flush()
+                    coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
+                    self.writter.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
+                    self.writter.add_scalar("Norm/Collection obs std",coll_obs_std,traj)
+                    self.writter.add_scalar("Main/Collection rewards",coll_reward,traj)
+                    self.writter.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
+                    self.writter.add_scalar("Norm/training state mean",states.mean(),traj)
+                    self.writter.add_scalar("Norm/training state std",states.std(),traj)
+                    self.writter.add_scalar("Norm/training nx state mean",nx_states.mean(),traj)
+                    self.writter.add_scalar("Norm/training nx state std",nx_states.std(),traj)
+                    
+                    self.writter.add_scalar("Main/loss Policy",policy_loss,traj)
+                    self.writter.add_scalar("Main/alpha value",alpha,traj)
+                    self.writter.add_scalar("Main/critic Loss",critic_loss,traj)
+                    self.writter.add_scalar("Main/action variance",actions.var(),traj)
+                    self.writter.add_scalar("Main/policy loss action variance",new_action.var(),traj)
                      
-
-
-
-
 if __name__ == "__main__":
-"""
-#main().train(False)
-#Test().run(True)
-
-import numpy as np
-
-import robosuite as suite
-import gymnasium as gym
-
-# create environment instance
-env = suite.make(
-    env_name="Stack", # try with other tasks like "Stack" and "Door"
-    robots="Panda",  # try with other robots like "Sawyer" and "Jaco"
-    gripper_types="JacoThreeFingerDexterousGripper",
-    has_renderer=True,
-    has_offscreen_renderer=False,
-    use_camera_obs=False,
-)
-
-# reset the environment
-env.reset()
-
-for i in range(1000):
-    action = np.random.randn(*env.action_spec[0].shape) * 0.1
-    obs, reward, done, info = env.step(action)  # take action in the environment
-    env.render()  # render on display
-    
-
-
-
+    #main().train(False)
+    #Test().run(True)
