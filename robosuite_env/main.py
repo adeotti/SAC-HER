@@ -59,10 +59,7 @@ env_configs = {
 
 def vec_env():
     def make_env():
-        x = suite.make(
-            env_name = "Stack",
-            **env_configs
-        )
+        x = suite.make(env_name = "Stack",**env_configs)
         x = GymWrapper(x,list(x.observation_spec()))
         x.metadata = {"render_mode":[]}
         try:
@@ -94,7 +91,7 @@ class Actor(nn.Module):
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
-        std = self.lstd(x).clamp(-5,2).exp()
+        std = self.l_std(x).clamp(-5,2).exp()
         dist = Normal(mean,std) 
         
         pre_tanh = dist.rsample()
@@ -142,7 +139,8 @@ class buffer:
             self.stor_actions = torch.empty((capacity,*act_dim),dtype=torch.float32)
             self.pointer = 0
     
-    def __init__(self,env,policy):
+    def __init__(self,env,policy,data_path):
+        self.data_path = data_path
         self._init_storage(data_path=None)
         self.env = env
         self.policy = policy
@@ -219,14 +217,14 @@ class buffer:
             "actions":self.stor_actions.half(),
             "pointer":self.pointer
         }
-        torch.save(data,"./data.pth") 
+        torch.save(data,self.data_path) 
     
     def utils(self):
         return self.norm_obs.mean(),self.norm_obs.std(),self.log_reward.mean()
 
 
 class main:
-    def __init__(self):
+    def __init__(self,storage_path):
         self.actor = Actor().to(hypers.device)
 
         self.q1 = Critic().to(hypers.device)
@@ -245,9 +243,10 @@ class main:
         self.log_alpha = torch.tensor(0.0,requires_grad=True,device=hypers.device)  
         self.alpha_optim = Adam([self.log_alpha],lr=hypers.lr)
         
+        self.storage_path = storage_path
         self.env = vec_env()
-        self.buffer = buffer(self.env,self.actor)
-        self.writter = SummaryWriter("./")
+        self.buffer = buffer(self.env,self.actor,self.storage_path)
+        self.writter = SummaryWriter(self.storage_path)
     
     def save(self,step):
         check = {
@@ -259,9 +258,13 @@ class main:
             "q2 target":self.q2_target.state_dict(),
             "critic optim":self.critic_optim.state_dict(),
             "alpha optim":self.alpha_optim.state_dict(),
-            "log_alpha":self.log_alpha
+            "log_alpha":self.log_alpha,
+
+            "obs_rms_mean",self.buffer.obs_rms.mean,
+            "obs_rms_var",self.buffer.obs_rms.var,
+            "obs_rms_count",self.buffer.obs_rms.count
         }
-        torch.save(check,f"./{step}.pth")
+        torch.save(check,f self.storage_path + "./{step}.pth")
     
     def load(self,model_path = None,strict=True):
         if model_path is not None:
@@ -275,6 +278,10 @@ class main:
             self.critic_optim.load_state_dict(check["critic optim"])
             self.log_alpha.data.copy_(check["log_alpha"].data)
             self.alpha_optim.load_state_dict(check["alpha optim"])
+
+            self.buffer.obs_rms.mean = check["obs_rms_mean"]
+            self.buffer.obs_rms.var = check["obs_rms_var"]
+            self.buffer.obs_rms.count = check["obs_rms_count"]
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
         running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
@@ -363,5 +370,5 @@ class main:
                     self.writter.add_scalar("Main/policy loss action variance",new_action.var(),traj)
                      
 if __name__ == "__main__":
-    main().train(True)
+    main(storage_path="./").train(True)
     
