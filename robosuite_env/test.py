@@ -28,13 +28,13 @@ def normalize(obs,obs_rms:RunningMeanStd): # norm obs
 obs = env.reset()[0]
 policy = Actor()
 
-checkpoint = torch.load("./34.pth",map_location="cpu") 
+checkpoint = torch.load("./19.pth",map_location="cpu",weights_only=False) 
 policy.load_state_dict(checkpoint["actor state"])
 
 obs_rms = RunningMeanStd(shape=(162,))
-obs_rms.mean = checkpoint[""]
-obs_rms.var = checkpoint[""]
-obs_rms.count = checkpoint[""]
+obs_rms.mean = checkpoint["obs_rms_mean"]
+obs_rms.var = checkpoint["obs_rms_var"]
+obs_rms.count = checkpoint["obs_rms_count"]
 
 with torch.no_grad():
     for i in range(100000):

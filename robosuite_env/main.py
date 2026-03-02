@@ -217,7 +217,7 @@ class buffer:
             "actions":self.stor_actions.half(),
             "pointer":self.pointer
         }
-        torch.save(data,self.data_path) 
+        torch.save(data,f"{self.data_path}buffer.pth") 
     
     def utils(self):
         return self.norm_obs.mean(),self.norm_obs.std(),self.log_reward.mean()
@@ -260,11 +260,11 @@ class main:
             "alpha optim":self.alpha_optim.state_dict(),
             "log_alpha":self.log_alpha,
 
-            "obs_rms_mean",self.buffer.obs_rms.mean,
-            "obs_rms_var",self.buffer.obs_rms.var,
-            "obs_rms_count",self.buffer.obs_rms.count
+            "obs_rms_mean":self.buffer.obs_rms.mean,
+            "obs_rms_var":self.buffer.obs_rms.var,
+            "obs_rms_count":self.buffer.obs_rms.count
         }
-        torch.save(check,f self.storage_path + "./{step}.pth")
+        torch.save(check,f"{self.storage_path}{step}.pth")
     
     def load(self,model_path = None,strict=True):
         if model_path is not None:
@@ -345,7 +345,7 @@ class main:
                     for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
                         q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
                         
-                    if traj%int(5e3) == 0 :
+                    if traj%int(10e3) == 0 :
                         n+=1
                         self.save(n)
                         self.buffer.save() 
