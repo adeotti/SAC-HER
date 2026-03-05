@@ -32,11 +32,11 @@ class Hypers:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
-    batchsize = 1024
+    batchsize = 256
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = int(2e4)
+    warmup = 5000
     max_steps = int(5e6)
     num_envs = 10
     horizon = 500
@@ -109,13 +109,18 @@ class Critic(nn.Module):
         self.l2 = nn.Linear(512,512)
         self.l3 = nn.Linear(512,512)
         self.output = nn.Linear(512,1)
+
+        self.ln1 = nn.LayerNorm(512)
+        self.ln2 = nn.LayerNorm(512)
+        self.ln3 = nn.LayerNorm(512)
+        self.dropout = nn.Dropout(0.01)
         self.apply(weight_init)
 
     def forward(self,obs,action):
         cat = torch.cat((obs,action),dim=-1)
-        x = F.silu(self.l1(cat))
-        x = F.silu(self.l2(x))
-        x = F.silu(self.l3(x))
+        x = F.silu(self.ln1(self.dropout(self.l1(cat))))
+        x = F.silu(self.ln2(self.dropout(self.l2(x))))
+        x = F.silu(self.ln3(self.dropout(self.l3(x))))
         x = self.output(x)
         return x
 
@@ -304,23 +309,30 @@ class main:
                     states,nx_states,reward,dones,actions = self.buffer.sample(hypers.batchsize) 
                     states = self.normalize(states,self.buffer.obs_rms)
                     nx_states = self.normalize(nx_states,self.buffer.obs_rms)
-        
+
                     with torch.no_grad():
                         nx_actions,log_nx_actions,_ = self.actor(nx_states)
                         min_q_target = torch.min(
-                                self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                            self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
                         ) 
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha*log policy(at|st))
 
-                    critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
-                    critic_loss += F.mse_loss(self.q2(states,actions),q_target)
+                    for _ in range(20): # DroQ                                                                       
+                        critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
+                        critic_loss += F.mse_loss(self.q2(states,actions),q_target)
 
-                    self.critic_optim.zero_grad(set_to_none=True)
-                    critic_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                    self.critic_optim.step()
+                        self.critic_optim.zero_grad(set_to_none=True)
+                        critic_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
+                        self.critic_optim.step()
+
+                        for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
+                            q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
                     
+                        for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
+                            q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
+
                     new_action,log_pi,_ = self.actor(states)
                     with torch.no_grad():
                         min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
@@ -337,14 +349,7 @@ class main:
                     self.alpha_optim.step()
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
-                    """
-                   
-                    for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
-                        q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
-                    
-                    for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
-                        q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
-                        
+                    """  
                     if traj%int(10e3) == 0 :
                         n+=1
                         self.save(n)
