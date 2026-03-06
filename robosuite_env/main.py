@@ -71,8 +71,8 @@ def vec_env():
 
 def weight_init(l):
     if isinstance(l,nn.Linear):
-        torch.nn.init.orthogonal_(l.weight)
-        torch.nn.init.constant_(l.bias,0.0)
+        nn.init.orthogonal_(l.weight)
+        nn.init.constant_(l.bias,0.0)
 
 class Actor(nn.Module):
     def __init__(self):
@@ -91,7 +91,7 @@ class Actor(nn.Module):
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
-        std = self.l_std(x).clamp(-5,2).exp()
+        std = self.l_std(x).clamp(-2,2).exp()
         dist = Normal(mean,std) 
         
         pre_tanh = dist.rsample()
@@ -115,6 +115,8 @@ class Critic(nn.Module):
         self.ln3 = nn.LayerNorm(512)
         self.dropout = nn.Dropout(0.01)
         self.apply(weight_init)
+        nn.init.uniform_(self.output.weight,-3e-4,3e-4)
+        nn.init.uniform_(self.output.bias -3e-4,3e-4)
 
     def forward(self,obs,action):
         cat = torch.cat((obs,action),dim=-1)
@@ -299,7 +301,7 @@ class main:
             self.load() 
             n = 0 
             #alpha = self.log_alpha.exp() for entropy autotune 
-            alpha = torch.tensor([0.2],dtype=torch.float32,device=hypers.device)
+            alpha = torch.tensor([0.1],dtype=torch.float32,device=hypers.device)
             
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
                 if not self.buffer.pointer == hypers.max_steps:
@@ -312,11 +314,12 @@ class main:
 
                     with torch.no_grad():
                         nx_actions,log_nx_actions,_ = self.actor(nx_states)
+                        max_q = alpha * abs(log_nx_actions.mean()) * 2
                         min_q_target = torch.min(
-                            self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
-                        ) 
+                                    self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                                    ).clamp(-max_q,max_q)
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
-                        # reward(st|at) + gamma * Q(st,at) - alpha*log policy(at|st))
+                        # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
                     for _ in range(20): # DroQ                                                                       
                         critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
@@ -335,7 +338,9 @@ class main:
 
                     new_action,log_pi,_ = self.actor(states)
                     with torch.no_grad():
-                        min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
+                        min_q = torch.min(
+                                self.q1(states,new_action),self.q2(states,new_action)
+                                ).clamp(-max_q,max_q)
                     policy_loss = ((alpha * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
                     self.actor.optim.zero_grad(set_to_none=True)
                     policy_loss.backward()
@@ -350,7 +355,7 @@ class main:
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
                     """  
-                    if traj%int(10e3) == 0 :
+                    if traj%int(5e3) == 0 :
                         n+=1
                         self.save(n)
                         self.buffer.save() 
