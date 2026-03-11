@@ -2,24 +2,24 @@ import gymnasium as gym
 import gymnasium_robotics,torch,sys
 gym.register_envs(gymnasium_robotics)
 from gymnasium.vector import SyncVectorEnv 
-import numpy as np
-from dataclasses import dataclass
 
-from torch import Tensor
+import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.optim import Adam
-import torch.nn.functional as F
+from torch import Tensor
 from torch import linalg as LA
-
-from collections import deque
-import random
-from tqdm import tqdm
-import threading,queue,itertools,copy
 from torch.utils.tensorboard import SummaryWriter
 
+import threading,queue,itertools,copy,random
+from collections import deque
+from tqdm import tqdm
+from dataclasses import dataclass
 
-class custom(gym.Wrapper):
+
+
+class custom_env(gym.Wrapper):
     def __init__(self,env):
         super().__init__(env)
       
@@ -37,18 +37,12 @@ class custom(gym.Wrapper):
 def vec_env():
     def make_env():
         x = gym.make("FetchPickAndPlace-v3",max_episode_steps=100)
-        x = custom(x)
+        x = custom_env(x)
         return x
     return SyncVectorEnv(
         [make_env for _ in range(hypers.num_envs)],autoreset_mode=gym.vector.AutoresetMode.DISABLED
     )
 
-def test_env(render_mode="human"):
-    x = (gym.make("FetchPickAndPlace-v3",max_episode_steps=100) if render_mode is None 
-        else gym.make("FetchPickAndPlace-v3",max_episode_steps=100,render_mode = render_mode)
-    )
-    x = custom(x)
-    return x
 
 @dataclass()
 class Hypers:
@@ -113,7 +107,8 @@ def process_obs(obs:dict):
     achieved_goal = obs["achieved_goal"] # (n env,3)
     desired_goal = obs["desired_goal"]   # (n env,3)
     output = torch.from_numpy(np.concatenate([observation,achieved_goal,desired_goal],axis=-1))
-    assert output.shape == torch.Size([hypers.num_envs,hypers.obs_dim]) or output.shape == torch.Size([hypers.obs_dim])
+    assert output.shape == torch.Size([hypers.num_envs,hypers.obs_dim]) \
+            or output.shape == torch.Size([hypers.obs_dim])
     return output.to(device=hypers.device,dtype=torch.float32) 
 
 def process_her_states(observation,achieved_goal,desired_goal):
@@ -127,6 +122,7 @@ def her_reward(goal_a,goal_b):
     distance_threshold = 0.05
     output = LA.norm(goal_a - goal_b,dim=-1)
     return -(output > distance_threshold).to(device=hypers.device,dtype=torch.float32)
+
 
 class buffer: 
     def _init_storage(self,path=None,capacity=hypers.max_steps): 
@@ -216,7 +212,9 @@ class buffer:
     def __len__(self):
         return len(self.curr_state)
 
-def her_sample(batch_size,k, curr_states,nx_states,rewards,truncs,actions,writter): # target ratio 4:1, strategy : future
+
+def her_sample(batch_size,k, curr_states,nx_states,rewards,truncs,actions,writter): 
+    # target ratio 4:1, strategy : future
     num_episodes = len(curr_states)//hypers.horizon
     all_curr,all_nx,all_rewards,all_truncs,all_actions = [],[],[],[],[]
 
@@ -240,7 +238,9 @@ def her_sample(batch_size,k, curr_states,nx_states,rewards,truncs,actions,writte
             future = batch[future_idx] # t'
             h_rewards = her_reward(nx["achieved_goal"],future["achieved_goal"])
             writter.add_scalar("Main/HER reward",h_rewards.mean(),new_style=True)
-            curr_her_transition = process_her_states(curr["observation"],curr["achieved_goal"],future["achieved_goal"])
+            curr_her_transition = process_her_states(
+                    curr["observation"],curr["achieved_goal"],future["achieved_goal"]
+            )
             nx_her_transition = process_her_states(nx["observation"],nx["achieved_goal"],future["achieved_goal"])
            
             all_curr.append(curr_her_transition)
@@ -249,7 +249,8 @@ def her_sample(batch_size,k, curr_states,nx_states,rewards,truncs,actions,writte
             all_truncs.append(truncs[epi_start_idx+idx])  
             all_actions.append(actions[epi_start_idx+idx])  
         
-    assert (len(all_curr)==len(all_nx)==len(all_rewards)==len(all_truncs)==len(all_actions)==(hypers.horizon*k)+hypers.horizon) 
+    assert (len(all_curr)==len(all_nx)==len(all_rewards)== \
+            len(all_truncs)==len(all_actions)==(hypers.horizon*k)+hypers.horizon) 
 
     s_c = torch.stack(all_curr) 
     s_nx = torch.stack(all_nx)
@@ -267,6 +268,7 @@ def her_sample(batch_size,k, curr_states,nx_states,rewards,truncs,actions,writte
         s_a[sample_idx].float(),
     )
 
+
 def her_worker(queue,buffer:buffer,writter): 
     while True:
         if len(buffer)>hypers.horizon:
@@ -281,6 +283,7 @@ def her_worker(queue,buffer:buffer,writter):
                 writter
             )
             queue.put((states,nx_state,reward,trunc,action))
+
 
 class main:
     def __init__(self):
@@ -350,7 +353,9 @@ class main:
                         target_action,log_target_action,_ = self.policy(nx_state)
                         q1_target = self.q1_target(nx_state,target_action)
                         q2_target = self.q2_target(nx_state,target_action)
-                        q_target = reward + (1-trunc) * hypers.gamma * (torch.min(q1_target,q2_target) - alpha * log_target_action)
+                        q_target = reward + (1-trunc) * hypers.gamma * (torch.min(q1_target,q2_target) 
+                        q_target -= (alpha * log_target_action)
+
                     q1 = self.q1(states,action) 
                     q2 = self.q2(states,action)
                     q_loss = F.mse_loss(q1,q_target) + F.mse_loss(q2,q_target)
