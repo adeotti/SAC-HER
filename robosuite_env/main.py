@@ -314,14 +314,13 @@ class main:
 
                     with torch.no_grad():
                         nx_actions,log_nx_actions,_ = self.actor(nx_states)
-                        max_q = alpha * abs(log_nx_actions.mean()) * 2
                         min_q_target = torch.min(
-                                    self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
-                                    ).clamp(-max_q,max_q)
+                            self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                        )
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
-                    for _ in range(20): # DroQ                                                                       
+                    for _ in range(20): # DroQ                                                                   
                         critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
                         critic_loss += F.mse_loss(self.q2(states,actions),q_target)
 
@@ -339,8 +338,8 @@ class main:
                     new_action,log_pi,_ = self.actor(states)
                     with torch.no_grad():
                         min_q = torch.min(
-                                self.q1(states,new_action),self.q2(states,new_action)
-                                ).clamp(-max_q,max_q)
+                            self.q1(states,new_action),self.q2(states,new_action)
+                        )
                     policy_loss = ((alpha * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
                     self.actor.optim.zero_grad(set_to_none=True)
                     policy_loss.backward()
@@ -354,6 +353,7 @@ class main:
                     self.alpha_optim.step()
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
+                    self.writter.add_scalar("Main/alpha value",alpha,traj)
                     """  
                     if traj%int(5e3) == 0 :
                         n+=1
@@ -364,21 +364,28 @@ class main:
                         self.buffer.save()
                     
                     coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
-                    self.writter.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
-                    self.writter.add_scalar("Norm/Collection obs std",coll_obs_std,traj)
+                    
                     self.writter.add_scalar("Main/Collection rewards",coll_reward,traj)
                     self.writter.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
+
+                    self.writter.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
+                    self.writter.add_scalar("Norm/Collection obs std",coll_obs_std,traj) 
                     self.writter.add_scalar("Norm/training state mean",states.mean(),traj)
                     self.writter.add_scalar("Norm/training state std",states.std(),traj)
                     self.writter.add_scalar("Norm/training nx state mean",nx_states.mean(),traj)
                     self.writter.add_scalar("Norm/training nx state std",nx_states.std(),traj)
                     
-                    self.writter.add_scalar("Main/loss Policy",policy_loss,traj)
-                    self.writter.add_scalar("Main/alpha value",alpha,traj)
-                    self.writter.add_scalar("Main/critic Loss",critic_loss,traj)
-                    self.writter.add_scalar("Main/action variance",actions.var(),traj)
-                    self.writter.add_scalar("Main/policy loss action variance",new_action.var(),traj)
-                     
+                    self.writter.add_scalar("policy/log action",(alpha * log_pi).mean(),traj)
+                    self.writter.add_scalar("policy/pred min Q target",min_q.mean(),traj)
+                    self.writter.add_scalar("policy/policy loss action variance",new_action.var(),traj)
+                    self.writter.add_scalar("policy/loss Policy",policy_loss,traj)
+                    self.writter.add_scalar("policy/action variance",actions.var(),traj)
+
+                    self.writter.add_scalar("critic/log action",(alpha * log_nx_actions).mean(),traj)
+                    self.writter.add_scalar("critic/pred min Q target",min_q_target.mean(),traj)
+                    self.writter.add_scalar("critic/critic Loss",critic_loss,traj)
+        
+                    
 if __name__ == "__main__":
     main(storage_path="./").train(True)
     
