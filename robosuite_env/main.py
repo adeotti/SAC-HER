@@ -300,8 +300,8 @@ class main:
         if start:
             self.load() 
             n = 0 
-            #alpha = self.log_alpha.exp() for entropy autotune 
-            alpha = torch.tensor([0.1],dtype=torch.float32,device=hypers.device)
+            alpha = self.log_alpha.exp() 
+            #alpha = torch.tensor([0.1],dtype=torch.float32,device=hypers.device)
             
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
                 if not self.buffer.pointer == hypers.max_steps:
@@ -320,20 +320,20 @@ class main:
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
-                    for _ in range(20): # DroQ                                                                   
-                        critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
-                        critic_loss += F.mse_loss(self.q2(states,actions),q_target)
+                    #for _ in range(20): # DroQ                                                                   
+                    critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
+                    critic_loss += F.mse_loss(self.q2(states,actions),q_target)
 
-                        self.critic_optim.zero_grad(set_to_none=True)
-                        critic_loss.backward()
-                        torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                        self.critic_optim.step()
+                    self.critic_optim.zero_grad(set_to_none=True)
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
+                    self.critic_optim.step()
 
-                        for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
-                            q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
-                    
-                        for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
-                            q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
+                    for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
+                        q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
+                
+                    for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
+                        q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
 
                     new_action,log_pi,_ = self.actor(states)
                     with torch.no_grad():
@@ -346,7 +346,7 @@ class main:
                     torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                     self.actor.optim.step()
 
-                    """ # Entropy auto tune
+                    # Entropy auto tune
                     alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
                     self.alpha_optim.zero_grad(set_to_none=True)
                     alpha_loss.backward()
@@ -354,7 +354,7 @@ class main:
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
                     self.writter.add_scalar("Main/alpha value",alpha,traj)
-                    """  
+                      
                     if traj%int(5e3) == 0 :
                         n+=1
                         self.save(n)
