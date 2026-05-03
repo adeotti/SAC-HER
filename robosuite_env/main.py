@@ -291,7 +291,7 @@ class main:
             self.buffer.obs_rms.count = check["obs_rms_count"]
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
-        running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
+        running_mean = torch.from_numpy(obs_rms.mean)self.q2(states,actions)self.q2(states,actions).to(hypers.device)
         running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
         output = (obs - running_mean ) / (running_std + 1e-8)
         return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32) 
@@ -301,7 +301,6 @@ class main:
             self.load() 
             n = 0 
             alpha = self.log_alpha.exp() 
-            #alpha = torch.tensor([0.1],dtype=torch.float32,device=hypers.device)
             
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
                 if not self.buffer.pointer == hypers.max_steps:
@@ -320,9 +319,10 @@ class main:
                         q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
-                    #for _ in range(20): # DroQ                                                                   
-                    critic_loss = F.mse_loss(self.q1(states,actions),q_target) 
-                    critic_loss += F.mse_loss(self.q2(states,actions),q_target)
+                    q1_pred = self.q1(states,actions) 
+                    q2_pred = self.q2(states,actions) 
+                    critic_loss = F.mse_loss(q1_pred,q_target) 
+                    critic_loss += F.mse_loss(q2_pred,q_target)
 
                     self.critic_optim.zero_grad(set_to_none=True)
                     critic_loss.backward()
