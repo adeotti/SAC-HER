@@ -36,7 +36,7 @@ class Hypers:
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = 5000
+    warmup = 50
     max_steps = int(5e6)
     num_envs = 10
     horizon = 500
@@ -185,6 +185,7 @@ class buffer:
             action = action.squeeze()
           
         nx_state,reward,done,_,_ = self.env.step(action.tolist())
+        self.env.render()
         
         for n in range(hypers.num_envs):
             self.reward[n] += reward[n]
@@ -248,7 +249,7 @@ class main:
 
         self.entropy_target = -hypers.action_dim
         self.log_alpha = torch.tensor(0.0,requires_grad=True,device=hypers.device)  
-        self.alpha_optim = Adam([self.log_alpha],lr=hypers.lr)
+        self.alpha_optim = Adam([self.log_alpha],lr=1e-4)
         
         self.storage_path = storage_path
         self.env = vec_env()
@@ -291,7 +292,7 @@ class main:
             self.buffer.obs_rms.count = check["obs_rms_count"]
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
-        running_mean = torch.from_numpy(obs_rms.mean)self.q2(states,actions)self.q2(states,actions).to(hypers.device)
+        running_mean = torch.from_numpy(obs_rms.mean)
         running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
         output = (obs - running_mean ) / (running_std + 1e-8)
         return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32) 
