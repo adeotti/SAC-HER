@@ -54,7 +54,7 @@ env_configs = {
     "reward_shaping":True,             # Dense rewards env version 
     "horizon":hypers.horizon,          # Max steps before reset or trunc = True
     "control_freq":20,
-    "reward_scale":1.0
+    "reward_scale":10.0
     }
 
 def vec_env():
@@ -249,7 +249,7 @@ class main:
 
         self.entropy_target = -hypers.action_dim
         self.log_alpha = torch.tensor(0.0,requires_grad=True,device=hypers.device)  
-        self.alpha_optim = Adam([self.log_alpha],lr=1e-4)
+        self.alpha_optim = Adam([self.log_alpha],lr=1e-5)
         
         self.storage_path = storage_path
         self.env = vec_env()
@@ -328,7 +328,7 @@ class main:
                     self.critic_optim.zero_grad(set_to_none=True)
                     critic_loss.backward()
                     torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                    self.critic_optim.step()
+                    self.critic_optim.step()cd /teamspace/lightning_storage/sac
 
                     for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
                         q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
@@ -351,7 +351,10 @@ class main:
                     alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
                     self.alpha_optim.zero_grad(set_to_none=True)
                     alpha_loss.backward()
-                    self.alpha_optim.step()
+
+                    if self.buffer.pointer > hypers.warmup + 10_000: # delay to force max entropy for the first 15k steps
+                        self.alpha_optim.step()
+
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
                     self.writter.add_scalar("Main/alpha value",alpha,traj)
