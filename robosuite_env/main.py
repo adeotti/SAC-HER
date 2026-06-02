@@ -335,25 +335,32 @@ class main:
                 
                     for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
                         q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
+                    
+                    for p in self.q1.parameters(): p.requires_grad = False
+                    for p in self.q2.parameters(): p.requires_grad = False
 
                     new_action,log_pi,_ = self.actor(states)
-                    with torch.no_grad():
-                        min_q = torch.min(
-                            self.q1(states,new_action),self.q2(states,new_action)
-                        )
-                    policy_loss = ((alpha * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
+                    min_q = torch.min(
+                        self.q1(states,new_action),self.q2(states,new_action)
+                    )
+                    
+                    # alpla * log policy(at|st) - Q(st,at)
+                    policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() 
+                    
                     self.actor.optim.zero_grad(set_to_none=True)
                     policy_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                     self.actor.optim.step()
 
+                    for p in self.q1.parameters(): p.requires_grad = True
+                    for p in self.q2.parameters(): p.requires_grad = True
+
                     # Entropy auto tune
                     alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
                     self.alpha_optim.zero_grad(set_to_none=True)
                     alpha_loss.backward()
-
-                    if self.buffer.pointer > hypers.warmup + 10_000: # delay to force max entropy for the first 15k steps
-                        self.alpha_optim.step()
+                    #if self.buffer.pointer > hypers.warmup + int(1e5):
+                    self.alpha_optim.step()
 
                     alpha = self.log_alpha.exp()
                     self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
