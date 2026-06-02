@@ -36,7 +36,7 @@ class Hypers:
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = 50
+    warmup = 5000
     max_steps = int(5e6)
     num_envs = 10
     horizon = 500
@@ -114,9 +114,7 @@ class Critic(nn.Module):
         self.ln2 = nn.LayerNorm(512)
         self.ln3 = nn.LayerNorm(512)
         self.dropout = nn.Dropout(0.01)
-        self.apply(weight_init)
-        nn.init.uniform_(self.output.weight,-3e-4,3e-4)
-        nn.init.uniform_(self.output.bias -3e-4,3e-4)
+        self.apply(weight_init) 
 
     def forward(self,obs,action):
         cat = torch.cat((obs,action),dim=-1)
@@ -253,7 +251,7 @@ class main:
         self.storage_path = storage_path
         self.env = vec_env()
         self.buffer = buffer(self.env,self.actor,self.storage_path)
-        self.writter = SummaryWriter(self.storage_path)
+        self.writer = SummaryWriter(self.storage_path)
     
     def save(self,step):
         check = {
@@ -316,7 +314,7 @@ class main:
                         min_q_target = torch.min(
                             self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
                         )
-                        q_target = reward + hypers.gamma * (1-dones) * (min_q_target - alpha * log_nx_actions)
+                        q_target = reward + hypers.gamma * (min_q_target - alpha * log_nx_actions)
                         # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
                     q1_pred = self.q1(states,actions) 
