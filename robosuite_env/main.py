@@ -289,7 +289,7 @@ class main:
             self.buffer.obs_rms.count = check["obs_rms_count"]
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
-        running_mean = torch.from_numpy(obs_rms.mean)
+        running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
         running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
         output = (obs - running_mean ) / (running_std + 1e-8)
         return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32) 
@@ -305,7 +305,7 @@ class main:
                     self.buffer.step()
 
                 if self.buffer.pointer > hypers.warmup:
-                    states,nx_states,reward,dones,actions = self.buffer.sample(hypers.batchsize) 
+                    states,nx_states,reward,_,actions = self.buffer.sample(hypers.batchsize) 
                     states = self.normalize(states,self.buffer.obs_rms)
                     nx_states = self.normalize(nx_states,self.buffer.obs_rms)
 
@@ -355,8 +355,7 @@ class main:
                     # Entropy auto tune
                     alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
                     self.alpha_optim.zero_grad(set_to_none=True)
-                    alpha_loss.backward()
-                    #if self.buffer.pointer > hypers.warmup + int(1e5):
+                    alpha_loss.backward() 
                     self.alpha_optim.step()
 
                     alpha = self.log_alpha.exp()
