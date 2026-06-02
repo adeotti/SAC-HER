@@ -185,7 +185,6 @@ class buffer:
             action = action.squeeze()
           
         nx_state,reward,done,_,_ = self.env.step(action.tolist())
-        self.env.render()
         
         for n in range(hypers.num_envs):
             self.reward[n] += reward[n]
@@ -328,7 +327,7 @@ class main:
                     self.critic_optim.zero_grad(set_to_none=True)
                     critic_loss.backward()
                     torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                    self.critic_optim.step()cd /teamspace/lightning_storage/sac
+                    self.critic_optim.step()
 
                     for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
                         q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
