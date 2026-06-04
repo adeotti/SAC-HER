@@ -245,7 +245,7 @@ class main:
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
         self.entropy_target = -hypers.action_dim
-        self.log_alpha = torch.tensor(0.0,requires_grad=True,device=hypers.device)  
+        self.log_alpha = torch.tensor(4.0,requires_grad=True,device=hypers.device)  
         self.alpha_optim = Adam([self.log_alpha],lr=1e-5)
         
         self.storage_path = storage_path
@@ -273,7 +273,7 @@ class main:
     
     def load(self,model_path = None,strict=True):
         if model_path is not None:
-            check = torch.load(model_path,map_location=hypers.device)
+            check = torch.load(model_path,weights_only=False,map_location=hypers.device)
             self.actor.load_state_dict(check["actor state"],strict)
             self.actor.optim.load_state_dict(check["actor optim"])
             self.q1.load_state_dict(check["q1 state"],strict)
@@ -287,6 +287,11 @@ class main:
             self.buffer.obs_rms.mean = check["obs_rms_mean"]
             self.buffer.obs_rms.var = check["obs_rms_var"]
             self.buffer.obs_rms.count = check["obs_rms_count"]
+
+    def resume_training(self):
+        # Load buffer data
+        self.load(model_path=None)
+        pass
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
         running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
@@ -296,7 +301,8 @@ class main:
         
     def train(self,start=False):
         if start:
-            self.load() 
+            # self.resume_training(
+            #)
             n = 0 
             alpha = self.log_alpha.exp() 
             
