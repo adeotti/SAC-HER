@@ -245,13 +245,15 @@ class main:
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
         self.entropy_target = -hypers.action_dim
-        self.log_alpha = torch.tensor(4.0,requires_grad=True,device=hypers.device)  
-        self.alpha_optim = Adam([self.log_alpha],lr=1e-5)
+        self.log_alpha = torch.tensor(3.0,requires_grad=True,device=hypers.device)  
+        self.alpha_optim = Adam([self.log_alpha],lr=1e-6)
         
         self.storage_path = storage_path
         self.env = vec_env()
         self.buffer = buffer(self.env,self.actor,self.storage_path)
         self.writer = SummaryWriter(self.storage_path)
+
+        self.n = 0 # tracking number for model data saving
     
     def save(self,step):
         check = {
@@ -288,10 +290,11 @@ class main:
             self.buffer.obs_rms.var = check["obs_rms_var"]
             self.buffer.obs_rms.count = check["obs_rms_count"]
 
-    def resume_training(self):
-        # Load buffer data
-        self.load(model_path=None)
-        pass
+    def resume_job(self,resume=False,buffer_data,model_data): # method to load weights or data to resume training job
+        if resume:
+            self.load(model_data)
+            self.buffer._init_storage(data_path=buffer_data)
+            self.n = 0 # if the last run stoped at model_40 self.n here should be 40
     
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
         running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
@@ -301,9 +304,7 @@ class main:
         
     def train(self,start=False):
         if start:
-            # self.resume_training(
-            #)
-            n = 0 
+            self.resume_job(False,buffer_data=None,model_data=None)
             alpha = self.log_alpha.exp() 
             
             for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
@@ -365,12 +366,12 @@ class main:
                     self.alpha_optim.step()
 
                     alpha = self.log_alpha.exp()
-                    self.writter.add_scalar("Main/entropy loss",alpha_loss,traj)
-                    self.writter.add_scalar("Main/alpha value",alpha,traj)
+                    self.writer.add_scalar("Main/entropy loss",alpha_loss,traj)
+                    self.writer.add_scalar("Main/alpha value",alpha,traj)
                       
                     if traj%int(5e3) == 0 :
-                        n+=1
-                        self.save(n)
+                        self.n+=1
+                        self.save(self.n)
                         self.buffer.save() 
                         
                     if self.buffer.pointer == hypers.max_steps:
@@ -381,22 +382,22 @@ class main:
                     self.writter.add_scalar("Main/Collection rewards",coll_reward,traj)
                     self.writter.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
 
-                    self.writter.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
-                    self.writter.add_scalar("Norm/Collection obs std",coll_obs_std,traj) 
-                    self.writter.add_scalar("Norm/training state mean",states.mean(),traj)
-                    self.writter.add_scalar("Norm/training state std",states.std(),traj)
+                    self.writer.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
+                    self.writer.add_scalar("Norm/Collection obs std",coll_obs_std,traj) 
+                    self.writer.add_scalar("Norm/training state mean",states.mean(),traj)
+                    self.writer.add_scalar("Norm/training state std",states.std(),traj)
                     self.writter.add_scalar("Norm/training nx state mean",nx_states.mean(),traj)
                     self.writter.add_scalar("Norm/training nx state std",nx_states.std(),traj)
                     
-                    self.writter.add_scalar("policy/log action",(alpha * log_pi).mean(),traj)
-                    self.writter.add_scalar("policy/pred min Q target",min_q.mean(),traj)
-                    self.writter.add_scalar("policy/policy loss action variance",new_action.var(),traj)
-                    self.writter.add_scalar("policy/loss Policy",policy_loss,traj)
+                    self.writer.add_scalar("policy/log action",(alpha * log_pi).mean(),traj)
+                    self.writer.add_scalar("policy/pred min Q target",min_q.mean(),traj)
+                    self.writer.add_scalar("policy/policy loss action variance",new_action.var(),traj)
+                    self.writer.add_scalar("policy/loss Policy",policy_loss,traj)
                     self.writter.add_scalar("policy/action variance",actions.var(),traj)
 
-                    self.writter.add_scalar("critic/log action",(alpha * log_nx_actions).mean(),traj)
-                    self.writter.add_scalar("critic/pred min Q target",min_q_target.mean(),traj)
-                    self.writter.add_scalar("critic/critic Loss",critic_loss,traj)
+                    self.writer.add_scalar("critic/log action",(alpha * log_nx_actions).mean(),traj)
+                    self.writer.add_scalar("critic/pred min Q target",min_q_target.mean(),traj)
+                    self.writer.add_scalar("critic/critic Loss",critic_loss,traj)
         
                     
 if __name__ == "__main__":
