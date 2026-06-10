@@ -185,18 +185,23 @@ class buffer:
             action,_,_ = self.policy(self.norm_obs)
             action = action.squeeze()
           
-        nx_state,reward,done,_,_ = self.env.step(action.tolist())
+        nx_state,reward,done,terminated,info = self.env.step(action.tolist())
         
         self.reward += reward
             if np.all(done):
+                last_obs = list(info.get("final_obs")) 
+                buffer_nx_state = torch.from_numpy(np.stack(last_obs))
+                
                 self.epi_reward = self.reward
                 self.reward *= 0
+            else:
+                buffer_nx_state = nx_state
 
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
 
         self.store(
             self.to_tensor(self.obs),
-            self.to_tensor(nx_state),
+            self.to_tensor(buffer_nx_state),
             self.to_tensor(reward),
             self.to_tensor(done),
             saved_action
