@@ -136,14 +136,14 @@ class buffer:
             self.stor_curr_states = self.data["curr_states"]  
             self.stor_nx_states = self.data["nx_states"]  
             self.stor_rewards = self.data["rewards"]  
-            self.stor_dones = self.data["dones"]  
+            self.stor_terminated = self.data["terminated"]  
             self.stor_actions = self.data["actions"]  
             self.pointer = int(self.data["pointer"])
         else:
             self.stor_curr_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
             self.stor_nx_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
             self.stor_rewards = torch.empty((capacity,hypers.num_envs,),dtype=torch.float32)
-            self.stor_dones = torch.empty((capacity,hypers.num_envs,),dtype=torch.bool)
+            self.stor_terminated = torch.empty((capacity,hypers.num_envs,),dtype=torch.bool)
             self.stor_actions = torch.empty((capacity,*act_dim),dtype=torch.float32)
             self.pointer = 0
     
@@ -165,7 +165,7 @@ class buffer:
         self.stor_curr_states[self.pointer] = curr_state
         self.stor_nx_states[self.pointer] = nx_state
         self.stor_rewards[self.pointer] = reward
-        self.stor_dones[self.pointer] = done
+        self.stor_terminated[self.pointer] = done
         self.stor_actions[self.pointer] = action
 
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm
@@ -203,7 +203,7 @@ class buffer:
             self.to_tensor(self.obs),
             self.to_tensor(buffer_nx_state),
             self.to_tensor(reward),
-            self.to_tensor(done),
+            self.to_tensor(terminated),
             saved_action
         )
         self.obs = nx_state
@@ -216,7 +216,7 @@ class buffer:
             self.stor_curr_states[idx].float().flatten(0,1).to(device=hypers.device),
             self.stor_nx_states[idx].float().flatten(0,1).to(device=hypers.device),
             self.stor_rewards[idx].unsqueeze(-1).flatten(0,1).to(device=hypers.device),
-            self.stor_dones[idx].float().unsqueeze(-1).flatten(0,1).to(device=hypers.device),
+            self.stor_terminated[idx].float().unsqueeze(-1).flatten(0,1).to(device=hypers.device),
             self.stor_actions[idx].float().flatten(0,1).to(device=hypers.device)
         )
        
@@ -225,7 +225,7 @@ class buffer:
             "curr_states":self.stor_curr_states.half(),
             "nx_states":self.stor_nx_states.half(),
             "rewards":self.stor_rewards.half(),
-            "dones":self.stor_dones.bool(),
+            "terminated":self.stor_terminated.bool(),
             "actions":self.stor_actions.half(),
             "pointer":self.pointer
         }
@@ -319,7 +319,7 @@ class main:
                     self.buffer.step()
 
                 if self.buffer.pointer > hypers.warmup:
-                    states,nx_states,reward,_,actions = self.buffer.sample(hypers.batchsize) 
+                    states,nx_states,reward,terminated,actions = self.buffer.sample(hypers.batchsize) 
                     states = self.normalize(states,self.buffer.obs_rms)
                     nx_states = self.normalize(nx_states,self.buffer.obs_rms)
 
@@ -328,8 +328,9 @@ class main:
                         min_q_target = torch.min(
                             self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
                         )
-                        q_target = reward + hypers.gamma * (min_q_target - alpha * log_nx_actions)
-                        # reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
+                        q_target = reward + hypers.gamma * (1-terminated)
+                        q_target *= (min_q_target - alpha * log_nx_actions)
+                        # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
                     q1_pred = self.q1(states,actions) 
                     q2_pred = self.q2(states,actions) 
