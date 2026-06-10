@@ -1,7 +1,7 @@
 import robosuite as suite
 from robosuite import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
-from gymnasium.vector import SyncVectorEnv
+from gymnasium.vector import SyncVectorEnv,AutoresetMode
 try:
     from gymnasium.wrappers import AutoResetWrapper
 except ImportError:
@@ -67,7 +67,10 @@ def vec_env():
         except NameError:
             x = AutoResetWrapper(x)
         return x
-    return SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
+    return SyncVectorEnv(
+            [make_env for _ in range(hypers.num_envs)],
+            autoreset_mode=AutoresetMode.SAME_STEP
+    )
 
 def weight_init(l):
     if isinstance(l,nn.Linear):
@@ -184,11 +187,10 @@ class buffer:
           
         nx_state,reward,done,_,_ = self.env.step(action.tolist())
         
-        for n in range(hypers.num_envs):
-            self.reward[n] += reward[n]
-            if done[n]:
-                self.epi_reward[n] = self.reward[n]
-                self.reward[n] = 0
+        self.reward += reward
+            if np.all(done):
+                self.epi_reward = self.reward
+                self.reward *= 0
 
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
 
