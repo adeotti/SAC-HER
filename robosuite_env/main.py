@@ -32,7 +32,7 @@ class Hypers:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
-    batchsize = 256
+    batchsize = 1024
     lr = 3e-4
     gamma = .99
     tau = .005
@@ -153,8 +153,8 @@ class buffer:
         self.env = env
         self.policy = policy
         self.obs = self.env.reset()[0]
-        self.epi_reward = torch.empty(hypers.num_envs)
-        self.reward = torch.empty(hypers.num_envs)
+        self.epi_reward = torch.zeros(hypers.num_envs)
+        self.reward = torch.zeros(hypers.num_envs)
         self.to_tensor = lambda x : torch.from_numpy(np.array(x)).to(hypers.device,dtype=torch.float32)
         self.steps = 0
         self.obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
@@ -188,14 +188,13 @@ class buffer:
         nx_state,reward,done,terminated,info = self.env.step(action.tolist())
         
         self.reward += reward
-            if np.all(done):
-                last_obs = list(info.get("final_obs")) 
-                buffer_nx_state = torch.from_numpy(np.stack(last_obs))
-                
-                self.epi_reward = self.reward
-                self.reward *= 0
-            else:
-                buffer_nx_state = nx_state
+        if np.all(done):
+            last_obs = list(info.get("final_obs")) 
+            buffer_nx_state = torch.from_numpy(np.stack(last_obs))
+            self.epi_reward = self.reward
+            self.reward *= 0
+        else:
+            buffer_nx_state = nx_state
 
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
 
@@ -252,7 +251,7 @@ class main:
         self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
 
         self.entropy_target = -hypers.action_dim
-        self.log_alpha = torch.tensor(3.0,requires_grad=True,device=hypers.device)  
+        self.log_alpha = torch.tensor(1.0,requires_grad=True,device=hypers.device)  
         self.alpha_optim = Adam([self.log_alpha],lr=1e-6)
         
         self.storage_path = storage_path
