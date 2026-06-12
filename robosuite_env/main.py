@@ -327,8 +327,7 @@ class main:
                         min_q_target = torch.min(
                             self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
                         )
-                        q_target = reward + hypers.gamma * (1-terminated)
-                        q_target *= (min_q_target - alpha * log_nx_actions)
+                        q_target = reward + hypers.gamma * (1-terminated) * (min_q_target - alpha * log_nx_actions)
                         # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
 
                     q1_pred = self.q1(states,actions) 
@@ -386,8 +385,8 @@ class main:
                     
                     coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
                     
-                    self.writter.add_scalar("Main/Collection rewards",coll_reward,traj)
-                    self.writter.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
+                    self.writer.add_scalar("Main/Collection rewards",coll_reward,traj)
+                    self.writer.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
 
                     self.writer.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
                     self.writer.add_scalar("Norm/Collection obs std",coll_obs_std,traj) 
