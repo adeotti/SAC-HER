@@ -7,7 +7,7 @@ try:
 except ImportError:
     from gymnasium.wrappers import Autoreset
 
-import torch,sys
+import torch,sys,gc
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.distributions import Normal
@@ -20,6 +20,7 @@ from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
+
 
 import warnings,logging
 warnings.filterwarnings("ignore")
@@ -191,7 +192,7 @@ class buffer:
         if np.all(done):
             last_obs = list(info.get("final_obs")) 
             buffer_nx_state = torch.from_numpy(np.stack(last_obs))
-            self.epi_reward = self.reward
+            self.epi_reward = self.reward.clone()
             self.reward *= 0
         else:
             buffer_nx_state = nx_state
@@ -372,38 +373,39 @@ class main:
                     self.alpha_optim.step()
 
                     alpha = self.log_alpha.exp()
-                    self.writer.add_scalar("Main/entropy loss",alpha_loss,traj)
-                    self.writer.add_scalar("Main/alpha value",alpha,traj)
+                    self.writer.add_scalar("Main/entropy loss",alpha_loss.item(),traj)
+                    self.writer.add_scalar("Main/alpha value",alpha.item(),traj)
                       
                     if traj%int(5e3) == 0 :
                         self.n+=1
                         self.save(self.n)
-                        self.buffer.save() 
-                        
+                        self.buffer.save()
+                        gc.collect()
+                         
                     if self.buffer.pointer == hypers.max_steps:
                         self.buffer.save()
                     
                     coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
                     
                     self.writer.add_scalar("Main/Collection rewards",coll_reward,traj)
-                    self.writer.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean(),traj)
+                    self.writer.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean().item(),traj)
 
-                    self.writer.add_scalar("Norm/Collection obs mean",coll_obs_mean,traj)
-                    self.writer.add_scalar("Norm/Collection obs std",coll_obs_std,traj) 
-                    self.writer.add_scalar("Norm/training state mean",states.mean(),traj)
-                    self.writer.add_scalar("Norm/training state std",states.std(),traj)
-                    self.writter.add_scalar("Norm/training nx state mean",nx_states.mean(),traj)
-                    self.writter.add_scalar("Norm/training nx state std",nx_states.std(),traj)
+                    self.writer.add_scalar("Norm/Collection obs mean",coll_obs_mean.item(),traj)
+                    self.writer.add_scalar("Norm/Collection obs std",coll_obs_std.item(),traj) 
+                    self.writer.add_scalar("Norm/training state mean",states.mean().item(),traj)
+                    self.writer.add_scalar("Norm/training state std",states.std().item(),traj)
+                    self.writter.add_scalar("Norm/training nx state mean",nx_states.mean().item(),traj)
+                    self.writter.add_scalar("Norm/training nx state std",nx_states.std().item(),traj)
                     
-                    self.writer.add_scalar("policy/log action",(alpha * log_pi).mean(),traj)
-                    self.writer.add_scalar("policy/pred min Q target",min_q.mean(),traj)
-                    self.writer.add_scalar("policy/policy loss action variance",new_action.var(),traj)
-                    self.writer.add_scalar("policy/loss Policy",policy_loss,traj)
-                    self.writter.add_scalar("policy/action variance",actions.var(),traj)
+                    self.writer.add_scalar("policy/log action",(alpha * log_pi).mean().item(),traj)
+                    self.writer.add_scalar("policy/pred min Q target",min_q.mean().item(),traj)
+                    self.writer.add_scalar("policy/policy loss action variance",new_action.var().item(),traj)
+                    self.writer.add_scalar("policy/loss Policy",policy_loss.item(),traj)
+                    self.writter.add_scalar("policy/action variance",actions.var().item(),traj)
 
-                    self.writer.add_scalar("critic/log action",(alpha * log_nx_actions).mean(),traj)
-                    self.writer.add_scalar("critic/pred min Q target",min_q_target.mean(),traj)
-                    self.writer.add_scalar("critic/critic Loss",critic_loss,traj)
+                    self.writer.add_scalar("critic/log action",(alpha * log_nx_actions).mean().item(),traj)
+                    self.writer.add_scalar("critic/pred min Q target",min_q_target.mean().item(),traj)
+                    self.writer.add_scalar("critic/critic Loss",critic_loss.item(),traj)
         
                     
 if __name__ == "__main__":
