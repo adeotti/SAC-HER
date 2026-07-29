@@ -7,14 +7,14 @@ try:
 except ImportError:
     from gymnasium.wrappers import Autoreset
 
-import torch,sys,gc
+import torch,sys
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.optim import Adam
-from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
+import mlflow
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from copy import deepcopy
 from tqdm import tqdm
@@ -22,15 +22,11 @@ from itertools import chain
 from dataclasses import dataclass
 
 
-import warnings,logging
-warnings.filterwarnings("ignore")
-logging.disable(logging.CRITICAL)
-
 @dataclass(frozen=False)
 class Hypers:
     ROBOT = "Panda"
     env_name = None
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
     batchsize = 1024
@@ -129,28 +125,18 @@ class Critic(nn.Module):
         return x
 
 class buffer: 
-    def _init_storage(self,data_path=None,capacity=hypers.max_steps):
+    def _init_storage(self,capacity=hypers.max_steps):
         obs_dim = (hypers.num_envs,hypers.obs_dim)     
         act_dim = (hypers.num_envs,hypers.action_dim) 
-        if data_path is not None:
-            self.data = torch.load(data_path,weights_only=False)
-            self.stor_curr_states = self.data["curr_states"]  
-            self.stor_nx_states = self.data["nx_states"]  
-            self.stor_rewards = self.data["rewards"]  
-            self.stor_terminated = self.data["terminated"]  
-            self.stor_actions = self.data["actions"]  
-            self.pointer = int(self.data["pointer"])
-        else:
-            self.stor_curr_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
-            self.stor_nx_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
-            self.stor_rewards = torch.empty((capacity,hypers.num_envs,),dtype=torch.float32)
-            self.stor_terminated = torch.empty((capacity,hypers.num_envs,),dtype=torch.bool)
-            self.stor_actions = torch.empty((capacity,*act_dim),dtype=torch.float32)
-            self.pointer = 0
+        self.stor_curr_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
+        self.stor_nx_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
+        self.stor_rewards = torch.empty((capacity,hypers.num_envs,),dtype=torch.float32)
+        self.stor_terminated = torch.empty((capacity,hypers.num_envs,),dtype=torch.bool)
+        self.stor_actions = torch.empty((capacity,*act_dim),dtype=torch.float32)
+        self.pointer = 0
     
-    def __init__(self,env,policy,data_path):
-        self.data_path = data_path
-        self._init_storage(data_path=None)
+    def __init__(self,env,policy):
+        self._init_storage()
         self.env = env
         self.policy = policy
         self.obs = self.env.reset()[0]
@@ -219,18 +205,7 @@ class buffer:
             self.stor_terminated[idx].float().unsqueeze(-1).flatten(0,1).to(device=hypers.device),
             self.stor_actions[idx].float().flatten(0,1).to(device=hypers.device)
         )
-       
-    def save(self):
-        data = {
-            "curr_states":self.stor_curr_states.half(),
-            "nx_states":self.stor_nx_states.half(),
-            "rewards":self.stor_rewards.half(),
-            "terminated":self.stor_terminated.bool(),
-            "actions":self.stor_actions.half(),
-            "pointer":self.pointer
-        }
-        torch.save(data,f"{self.data_path}buffer.pth") 
-    
+           
     def utils(self):
         return self.norm_obs.mean(),self.norm_obs.std(),self.log_reward.mean()
 
@@ -238,7 +213,6 @@ class buffer:
 class main:
     def __init__(self,storage_path):
         self.actor = Actor().to(hypers.device)
-
         self.q1 = Critic().to(hypers.device)
         self.q2 = Critic().to(hypers.device)
 
@@ -257,9 +231,7 @@ class main:
         
         self.storage_path = storage_path
         self.env = vec_env()
-        self.buffer = buffer(self.env,self.actor,self.storage_path)
-        self.writer = SummaryWriter(self.storage_path)
-
+        self.buffer = buffer(self.env,self.actor)
         self.n = 0 # tracking number for model data saving
     
     def save(self,step):
@@ -279,30 +251,7 @@ class main:
             "obs_rms_count":self.buffer.obs_rms.count
         }
         torch.save(check,f"{self.storage_path}{step}.pth")
-    
-    def load(self,model_path = None,strict=True):
-        if model_path is not None:
-            check = torch.load(model_path,weights_only=False,map_location=hypers.device)
-            self.actor.load_state_dict(check["actor state"],strict)
-            self.actor.optim.load_state_dict(check["actor optim"])
-            self.q1.load_state_dict(check["q1 state"],strict)
-            self.q1_target.load_state_dict(check["q1 target"],strict)
-            self.q2.load_state_dict(check["q2 state"],strict)
-            self.q2_target.load_state_dict(check["q2 target"],strict)
-            self.critic_optim.load_state_dict(check["critic optim"])
-            self.log_alpha.data.copy_(check["log_alpha"].data)
-            self.alpha_optim.load_state_dict(check["alpha optim"])
-
-            self.buffer.obs_rms.mean = check["obs_rms_mean"]
-            self.buffer.obs_rms.var = check["obs_rms_var"]
-            self.buffer.obs_rms.count = check["obs_rms_count"]
-
-    def resume_job(self,resume=False,buffer_data,model_data): # method to load weights or data to resume training job
-        if resume:
-            self.load(model_data)
-            self.buffer._init_storage(data_path=buffer_data)
-            self.n = 0 # if the last run stoped at model_40 self.n here should be 40
-    
+  
     def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
         running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
         running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
@@ -311,10 +260,9 @@ class main:
         
     def train(self,start=False):
         if start:
-            self.resume_job(False,buffer_data=None,model_data=None)
             alpha = self.log_alpha.exp() 
             
-            for traj in tqdm(range(hypers.max_steps-1),total=hypers.max_steps-1):
+            for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
                 if not self.buffer.pointer == hypers.max_steps:
                     self.buffer.step()
 
@@ -347,16 +295,12 @@ class main:
                     for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
                         q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
                     
-                    for p in self.q1.parameters(): p.requires_grad = False
-                    for p in self.q2.parameters(): p.requires_grad = False
+                    for p in self.q1.parameters() : p.requires_grad = False
+                    for p in self.q2.parameters() : p.requires_grad = False
 
                     new_action,log_pi,_ = self.actor(states)
-                    min_q = torch.min(
-                        self.q1(states,new_action),self.q2(states,new_action)
-                    )
-                    
-                    # alpla * log policy(at|st) - Q(st,at)
-                    policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() 
+                    min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
+                    policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
                     
                     self.actor.optim.zero_grad(set_to_none=True)
                     policy_loss.backward()
@@ -371,43 +315,47 @@ class main:
                     self.alpha_optim.zero_grad(set_to_none=True)
                     alpha_loss.backward() 
                     self.alpha_optim.step()
-
                     alpha = self.log_alpha.exp()
-                    self.writer.add_scalar("Main/entropy loss",alpha_loss.item(),traj)
-                    self.writer.add_scalar("Main/alpha value",alpha.item(),traj)
-                      
-                    if traj%int(5e3) == 0 :
+                
+                    if traj > 0 and traj % int(5e3) == 0 :
                         self.n+=1
                         self.save(self.n)
-                        self.buffer.save()
-                        gc.collect()
                          
-                    if self.buffer.pointer == hypers.max_steps:
-                        self.buffer.save()
-                    
-                    coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
-                    
-                    self.writer.add_scalar("Main/Collection rewards",coll_reward,traj)
-                    self.writer.add_scalar("Main/episodes rewards",self.buffer.epi_reward.mean().item(),traj)
+                        coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
 
-                    self.writer.add_scalar("Norm/Collection obs mean",coll_obs_mean.item(),traj)
-                    self.writer.add_scalar("Norm/Collection obs std",coll_obs_std.item(),traj) 
-                    self.writer.add_scalar("Norm/training state mean",states.mean().item(),traj)
-                    self.writer.add_scalar("Norm/training state std",states.std().item(),traj)
-                    self.writter.add_scalar("Norm/training nx state mean",nx_states.mean().item(),traj)
-                    self.writter.add_scalar("Norm/training nx state std",nx_states.std().item(),traj)
-                    
-                    self.writer.add_scalar("policy/log action",(alpha * log_pi).mean().item(),traj)
-                    self.writer.add_scalar("policy/pred min Q target",min_q.mean().item(),traj)
-                    self.writer.add_scalar("policy/policy loss action variance",new_action.var().item(),traj)
-                    self.writer.add_scalar("policy/loss Policy",policy_loss.item(),traj)
-                    self.writter.add_scalar("policy/action variance",actions.var().item(),traj)
+                        mlflow.log_metrics(
+                            {
+                                "Main/collection rewards" : coll_reward,
+                                "Main/episodes rewards" : self.buffer.epi_reward.mean().item(),
 
-                    self.writer.add_scalar("critic/log action",(alpha * log_nx_actions).mean().item(),traj)
-                    self.writer.add_scalar("critic/pred min Q target",min_q_target.mean().item(),traj)
-                    self.writer.add_scalar("critic/critic Loss",critic_loss.item(),traj)
-        
-                    
+                                "Main/entropy loss" : alpha_loss.item(),
+                                "Main/alpha value" : alpha.item(),
+
+                                "Norm/collection obs mean" : coll_obs_mean.item(),
+                                "Norm/collection obs std" : coll_obs_std.item(), 
+                                "Norm/training state mean" : states.mean().item(),
+                                "Norm/training state std" : states.std().item(),
+                                "Norm/training nx state mean" : nx_states.mean().item(),
+                                "Norm/training nx state std" : nx_states.std().item(),
+
+                                "policy/log action" : (alpha * log_pi).mean().item(),
+                                "policy/pred min Q target" : min_q.mean().item(),
+                                "policy/policy loss action variance" : new_action.var().item(),
+                                "policy/loss Policy" : policy_loss.item(),
+                                "policy/action variance" : actions.var().item(),
+
+                                "critic/log action" : (alpha * log_nx_actions).mean().item(),
+                                "critic/pred min Q target" : min_q_target.mean().item(),
+                                "critic/critic Loss" : critic_loss.item()
+                            },
+                            step = traj
+                        )
+
+
 if __name__ == "__main__":
+    import warnings,logging
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+
     main(storage_path="./").train(True)
     
