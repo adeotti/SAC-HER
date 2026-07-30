@@ -20,6 +20,7 @@ from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
+import multiprocessing as mp
 
 
 @dataclass(frozen=False)
@@ -37,6 +38,7 @@ class Hypers:
     max_steps = int(5e6)
     num_envs = 10
     horizon = 500
+    buffer_size = int(1e5)
 
 hypers = Hypers()
     
@@ -54,6 +56,7 @@ env_configs = {
     "reward_scale":10.0
     }
 
+
 def vec_env():
     def make_env():
         x = suite.make(env_name = "Stack",**env_configs)
@@ -64,15 +67,16 @@ def vec_env():
         except NameError:
             x = AutoResetWrapper(x)
         return x
-    return SyncVectorEnv(
-            [make_env for _ in range(hypers.num_envs)],
+    return SyncVectorEnv([make_env for _ in range(hypers.num_envs)],
             autoreset_mode=AutoresetMode.SAME_STEP
     )
+
 
 def weight_init(l):
     if isinstance(l,nn.Linear):
         nn.init.orthogonal_(l.weight)
         nn.init.constant_(l.bias,0.0)
+
 
 class Actor(nn.Module):
     def __init__(self):
@@ -116,7 +120,7 @@ class Critic(nn.Module):
         self.dropout = nn.Dropout(0.01)
         self.apply(weight_init) 
 
-    def forward(self,obs,action):
+    def forward(self,obs,action): # TODO update forward
         cat = torch.cat((obs,action),dim=-1)
         x = F.silu(self.ln1(self.dropout(self.l1(cat))))
         x = F.silu(self.ln2(self.dropout(self.l2(x))))
@@ -124,91 +128,89 @@ class Critic(nn.Module):
         x = self.output(x)
         return x
 
-class buffer: 
-    def _init_storage(self,capacity=hypers.max_steps):
-        obs_dim = (hypers.num_envs,hypers.obs_dim)     
-        act_dim = (hypers.num_envs,hypers.action_dim) 
-        self.stor_curr_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
-        self.stor_nx_states = torch.empty((capacity,*obs_dim),dtype=torch.float32)
-        self.stor_rewards = torch.empty((capacity,hypers.num_envs,),dtype=torch.float32)
-        self.stor_terminated = torch.empty((capacity,hypers.num_envs,),dtype=torch.bool)
-        self.stor_actions = torch.empty((capacity,*act_dim),dtype=torch.float32)
-        self.pointer = 0
-    
-    def __init__(self,env,policy):
-        self._init_storage()
-        self.env = env
-        self.policy = policy
-        self.obs = self.env.reset()[0]
-        self.epi_reward = torch.zeros(hypers.num_envs)
-        self.reward = torch.zeros(hypers.num_envs)
-        self.to_tensor = lambda x : torch.from_numpy(np.array(x)).to(hypers.device,dtype=torch.float32)
-        self.steps = 0
-        self.obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
-        self.norm_obs = None
-        self.log_reward = None
-    
-    def store(self,curr_state,nx_state,reward,done,action):
-        self.stor_curr_states[self.pointer] = curr_state
-        self.stor_nx_states[self.pointer] = nx_state
-        self.stor_rewards[self.pointer] = reward
-        self.stor_terminated[self.pointer] = done
-        self.stor_actions[self.pointer] = action
 
-    def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm
-        running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
-        running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
-        output = (torch.from_numpy(obs).to(hypers.device) - running_mean ) / (running_std + 1e-8)
-        return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32) 
+def normalize(obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
+    running_mean = torch.from_numpy(obs_rms.mean)
+    running_std = torch.from_numpy(obs_rms.var).sqrt()
+    output = (obs - running_mean ) / (running_std + 1e-8)
+    return output.clamp(-5,5) 
 
-    @torch.no_grad()
-    def step(self):
-        self.steps+=1
-        self.obs_rms.update(self.obs) # tracking values for running stats
-        if self.pointer<hypers.warmup:
-            action = self.env.action_space.sample()
+
+def create_storage():
+    obs_dim = (hypers.num_envs,hypers.obs_dim)     
+    act_dim = (hypers.num_envs,hypers.action_dim)
+    return (
+        torch.empty((hypers.horizon,*obs_dim),dtype=torch.half),
+        torch.empty((hypers.horizon,*obs_dim),dtype=torch.half),
+        torch.empty((hypers.horizon,hypers.num_envs,),dtype=torch.half),
+        torch.empty((hypers.horizon,hypers.num_envs,),dtype=torch.bool),
+        torch.empty((hypers.horizon,*act_dim),dtype=torch.half) 
+    )
+
+
+@torch.no_grad()
+def step(queue,env,policy,obs_rms):
+    stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
+    pointer = 0
+    reward__ = torch.zeros(hypers.num_envs)
+    obs = torch.from_numpy(env.reset()[0])
+
+    while True:
+        obs_rms.update(obs.numpy() if torch.is_tensor(obs) else obs) # tracking values for running stats
+
+        if pointer < hypers.warmup:
+            action = env.action_space.sample()
         else:
-            self.norm_obs = self.normalize(self.obs,self.obs_rms)
-            action,_,_ = self.policy(self.norm_obs)
+            norm_obs = normalize(obs,obs_rms)
+            action,_,_ = policy(obs)
             action = action.squeeze()
-          
-        nx_state,reward,done,terminated,info = self.env.step(action.tolist())
+         
+        nx_state,reward,done,terminated,info = env.step(action.tolist())
         
-        self.reward += reward
+        reward__ += reward
         if np.all(done):
             last_obs = list(info.get("final_obs")) 
             buffer_nx_state = torch.from_numpy(np.stack(last_obs))
-            self.epi_reward = self.reward.clone()
-            self.reward *= 0
+            reward__ *= 0
         else:
             buffer_nx_state = nx_state
 
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
+        
+        stor_curr_states[pointer].copy_(torch.as_tensor(obs))
+        stor_nx_states[pointer].copy_(torch.as_tensor(buffer_nx_state))
+        stor_rewards[pointer].copy_(torch.from_numpy(reward))
+        stor_terminated[pointer].copy_(torch.from_numpy(terminated))
+        stor_actions[pointer].copy_(saved_action)
 
-        self.store(
-            self.to_tensor(self.obs),
-            self.to_tensor(buffer_nx_state),
-            self.to_tensor(reward),
-            self.to_tensor(terminated),
-            saved_action
-        )
-        self.obs = nx_state
-        self.pointer+=1  
-        self.log_reward = reward
-  
-    def sample(self,batch):
+        obs = nx_state
+        pointer+=1     
+     
+        if pointer == hypers.horizon:
+            data = (stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions)
+            queue.put(data)
+            pointer = 0
+            reward__.mean() # TODO log mean()
+            stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
+            reward_ = torch.zeros(hypers.num_envs)
+
+
+def sample(ep_queue,gpu_stream):
+    while True:
+        ep_curr_state,ep_nx_state,ep_rewards,ep_terminated,ep_actions = ep_queue.get()
+        
+        print(ep_curr_state.shape,ep_nx_state.shape,ep_rewards.shape,ep_terminated.shape)
+        sys.exit()
+    
         idx = torch.randint(0,self.pointer,(batch,))
         return (
-            self.stor_curr_states[idx].float().flatten(0,1).to(device=hypers.device),
-            self.stor_nx_states[idx].float().flatten(0,1).to(device=hypers.device),
-            self.stor_rewards[idx].unsqueeze(-1).flatten(0,1).to(device=hypers.device),
-            self.stor_terminated[idx].float().unsqueeze(-1).flatten(0,1).to(device=hypers.device),
-            self.stor_actions[idx].float().flatten(0,1).to(device=hypers.device)
+            self.stor_curr_states[idx].float().flatten(0,1),
+            self.stor_nx_states[idx].float().flatten(0,1),
+            self.stor_rewards[idx].unsqueeze(-1).flatten(0,1),
+            self.stor_terminated[idx].float().unsqueeze(-1).flatten(0,1),
+            self.stor_actions[idx].float().flatten(0,1)
         )
-           
-    def utils(self):
-        return self.norm_obs.mean(),self.norm_obs.std(),self.log_reward.mean()
-
+   
 
 class main:
     def __init__(self,storage_path):
@@ -223,17 +225,16 @@ class main:
         self.q1.compile()
         self.q2.compile()
 
-        self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr)
+        self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr,fused=True)
 
         self.entropy_target = -hypers.action_dim
         self.log_alpha = torch.tensor(1.0,requires_grad=True,device=hypers.device)  
         self.alpha_optim = Adam([self.log_alpha],lr=1e-6)
         
         self.storage_path = storage_path
-        self.env = vec_env()
-        self.buffer = buffer(self.env,self.actor)
-        self.n = 0 # tracking number for model data saving
-    
+        self.n = 0 # tracking number for model data saving      
+            
+
     def save(self,step):
         check = {
             "actor state":self.actor.state_dict(),
@@ -250,23 +251,30 @@ class main:
             "obs_rms_var":self.buffer.obs_rms.var,
             "obs_rms_count":self.buffer.obs_rms.count
         }
-        torch.save(check,f"{self.storage_path}{step}.pth")
-  
-    def normalize(self,obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
-        running_mean = torch.from_numpy(obs_rms.mean).to(hypers.device)
-        running_std = torch.from_numpy(obs_rms.var).sqrt().to(hypers.device)
-        output = (obs - running_mean ) / (running_std + 1e-8)
-        return output.clamp(-5,5).to(device=hypers.device,dtype=torch.float32) 
-        
+        torch.save(check,f"{self.storage_path}{step}")
+
+
     def train(self,start=False):
         if start:
-            alpha = self.log_alpha.exp() 
-            
-            for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
-                if not self.buffer.pointer == hypers.max_steps:
-                    self.buffer.step()
+            actor_cpu = Actor()
+            actor_cpu.share_memory()
 
-                if self.buffer.pointer > hypers.warmup:
+            ep_queue = mp.Queue(maxsize=50) # epside queue
+            for n in range(5):
+                obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
+                env = vec_env()
+                step_thread = mp.Process(target=step,args=(ep_queue,env,actor_cpu,obs_rms,),daemon=True)
+                step_thread.start()
+
+            if ep_queue.full():
+                batch_queue = mp.Queue(maxsize=10)
+                batch_process = mp.Process(target=sample,args=(ep_queue,batch_queue,),daemon=True)
+                batch_process.start()
+
+                sys.exit()
+                alpha = self.log_alpha.exp() 
+                
+                for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
                     states,nx_states,reward,terminated,actions = self.buffer.sample(hypers.batchsize) 
                     states = self.normalize(states,self.buffer.obs_rms)
                     nx_states = self.normalize(nx_states,self.buffer.obs_rms)
@@ -316,11 +324,12 @@ class main:
                     alpha_loss.backward() 
                     self.alpha_optim.step()
                     alpha = self.log_alpha.exp()
-                
+
                     if traj > 0 and traj % int(5e3) == 0 :
                         self.n+=1
                         self.save(self.n)
-                         
+
+                    if traj > 0 and traj % int(1e3) == 0 :
                         coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
 
                         mlflow.log_metrics(
@@ -350,7 +359,7 @@ class main:
                             },
                             step = traj
                         )
-
+                        
 
 if __name__ == "__main__":
     import warnings,logging
