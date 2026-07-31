@@ -1,3 +1,8 @@
+import warnings
+import logging
+warnings.filterwarnings("ignore")
+logging.disable(logging.CRITICAL)
+
 import robosuite as suite
 from robosuite import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
@@ -7,20 +12,19 @@ try:
 except ImportError:
     from gymnasium.wrappers import Autoreset
 
-import torch,sys
+import torch,sys,time,mlflow
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.optim import Adam
-
 import numpy as np
-import mlflow
+import torch.multiprocessing as mp
+
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
-import multiprocessing as mp
 
 
 @dataclass(frozen=False)
@@ -30,7 +34,7 @@ class Hypers:
     device = torch.device("cuda:0")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
-    batchsize = 1024
+    batch_size =  32 #1024
     lr = 3e-4
     gamma = .99
     tau = .005
@@ -149,7 +153,8 @@ def create_storage():
 
 
 @torch.no_grad()
-def step(queue,env,policy,obs_rms):
+def step(queue,policy,obs_rms): 
+    env = vec_env()
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
     reward__ = torch.zeros(hypers.num_envs)
@@ -196,21 +201,45 @@ def step(queue,env,policy,obs_rms):
 
 
 def sample(ep_queue,gpu_stream):
+    n_batch = 50
+    b_state = torch.zeros((n_batch,hypers.horizon,hypers.num_envs,162),dtype=torch.half)
+    b_nx_state = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,162,dtype=torch.half)
+    b_rewards = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.half)
+    b_terminated = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.bool)
+    b_actions = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,9,dtype=torch.half)
+    global_idx = 0
+    
     while True:
         ep_curr_state,ep_nx_state,ep_rewards,ep_terminated,ep_actions = ep_queue.get()
         
-        print(ep_curr_state.shape,ep_nx_state.shape,ep_rewards.shape,ep_terminated.shape)
-        sys.exit()
-    
-        idx = torch.randint(0,self.pointer,(batch,))
-        return (
-            self.stor_curr_states[idx].float().flatten(0,1),
-            self.stor_nx_states[idx].float().flatten(0,1),
-            self.stor_rewards[idx].unsqueeze(-1).flatten(0,1),
-            self.stor_terminated[idx].float().unsqueeze(-1).flatten(0,1),
-            self.stor_actions[idx].float().flatten(0,1)
-        )
-   
+        p = global_idx % n_batch
+
+        b_state[p].copy_(ep_curr_state)
+        b_nx_state[p].copy_(ep_nx_state)
+        b_rewards[p].copy_(ep_rewards)
+        b_terminated[p].copy_(ep_terminated)
+        b_actions[p].copy_(ep_actions)
+        
+        global_idx += 1
+        current_capacity = min(global_idx,n_batch)
+        
+        if current_capacity < 10:
+            print(current_capacity,flush=True)
+            continue
+
+        idx_chunks = torch.randint(0, current_capacity, (hypers.batch_size,))
+        idx_horizons = torch.randint(0, hypers.horizon, (hypers.batch_size,))
+        idx_envs = torch.randint(0, hypers.num_envs, (hypers.batch_size,))
+
+        s_states = b_state[idx_chunks,idx_horizons,idx_envs].float()
+        s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs].float() 
+        s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].float().unsqueeze(-1)
+        s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].float().unsqueeze(-1)
+        s_actions = b_actions[idx_chunks,idx_horizons,idx_envs].float()
+
+        gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions))
+        print("heareeee --",flush=True)
+  
 
 class main:
     def __init__(self,storage_path):
@@ -234,7 +263,7 @@ class main:
         self.storage_path = storage_path
         self.n = 0 # tracking number for model data saving      
             
-
+    
     def save(self,step):
         check = {
             "actor state":self.actor.state_dict(),
@@ -258,113 +287,132 @@ class main:
         if start:
             actor_cpu = Actor()
             actor_cpu.share_memory()
-
-            ep_queue = mp.Queue(maxsize=50) # epside queue
+            
+            ep_queue = mp.Queue(maxsize=5) # 50 episode queue
+            process__ = []
+        
             for n in range(5):
                 obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
-                env = vec_env()
-                step_thread = mp.Process(target=step,args=(ep_queue,env,actor_cpu,obs_rms,),daemon=True)
+                step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,obs_rms,),daemon=True)
+                process__.append(step_thread)
                 step_thread.start()
 
-            if ep_queue.full():
-                batch_queue = mp.Queue(maxsize=10)
-                batch_process = mp.Process(target=sample,args=(ep_queue,batch_queue,),daemon=True)
-                batch_process.start()
+            pbar = tqdm(total=ep_queue._maxsize,desc="Warmup") # tracking epsidoes queue size
+            while True:
+                pbar.n = ep_queue.qsize()
+                pbar.refresh()
+                time.sleep(0.1)
+                if ep_queue.full():
+                    break
+        
+            for p in process__[5:]: # killing half of the processes to reduce memory consumption
+                p.terminate()
+                p.join()
+            
+            batch_queue = mp.Queue(maxsize=10)
+            batch_process = mp.Process(target=sample,args=(ep_queue,batch_queue,),daemon=True)
+            batch_process.start()
+            
+            pbar = tqdm(total=batch_queue._maxsize,desc="Warmup batch") # tracking epsidoes queue size
+            while True:
+                pbar.n = batch_queue.qsize()
+                pbar.refresh()
+                time.sleep(0.1)
+                if batch_queue.full():
+                    break
+        
+            alpha = self.log_alpha.exp() 
+        
+            for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
+                states,nx_states,reward,terminated,actions = self.buffer.sample(hypers.batchsize) 
+                states = self.normalize(states,self.buffer.obs_rms)
+                nx_states = self.normalize(nx_states,self.buffer.obs_rms)
 
-                sys.exit()
-                alpha = self.log_alpha.exp() 
+                with torch.no_grad():
+                    nx_actions,log_nx_actions,_ = self.actor(nx_states)
+                    min_q_target = torch.min(
+                        self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                    )
+                    q_target = reward + hypers.gamma * (1-terminated) * (min_q_target - alpha * log_nx_actions)
+                    # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
+
+                q1_pred = self.q1(states,actions) 
+                q2_pred = self.q2(states,actions) 
+                critic_loss = F.mse_loss(q1_pred,q_target) 
+                critic_loss += F.mse_loss(q2_pred,q_target)
+
+                self.critic_optim.zero_grad(set_to_none=True)
+                critic_loss.backward()
+                torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
+                self.critic_optim.step()
+
+                for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
+                    q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
+            
+                for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
+                    q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
                 
-                for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
-                    states,nx_states,reward,terminated,actions = self.buffer.sample(hypers.batchsize) 
-                    states = self.normalize(states,self.buffer.obs_rms)
-                    nx_states = self.normalize(nx_states,self.buffer.obs_rms)
+                for p in self.q1.parameters() : p.requires_grad = False
+                for p in self.q2.parameters() : p.requires_grad = False
 
-                    with torch.no_grad():
-                        nx_actions,log_nx_actions,_ = self.actor(nx_states)
-                        min_q_target = torch.min(
-                            self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
-                        )
-                        q_target = reward + hypers.gamma * (1-terminated) * (min_q_target - alpha * log_nx_actions)
-                        # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
-
-                    q1_pred = self.q1(states,actions) 
-                    q2_pred = self.q2(states,actions) 
-                    critic_loss = F.mse_loss(q1_pred,q_target) 
-                    critic_loss += F.mse_loss(q2_pred,q_target)
-
-                    self.critic_optim.zero_grad(set_to_none=True)
-                    critic_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                    self.critic_optim.step()
-
-                    for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
-                        q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
+                new_action,log_pi,_ = self.actor(states)
+                min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
+                policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
                 
-                    for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
-                        q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
-                    
-                    for p in self.q1.parameters() : p.requires_grad = False
-                    for p in self.q2.parameters() : p.requires_grad = False
+                self.actor.optim.zero_grad(set_to_none=True)
+                policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
+                self.actor.optim.step()
 
-                    new_action,log_pi,_ = self.actor(states)
-                    min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
-                    policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
-                    
-                    self.actor.optim.zero_grad(set_to_none=True)
-                    policy_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
-                    self.actor.optim.step()
+                if traj % 1000 : actor_cpu.load_state_dict(self.actor.state_dict()) # update cpu copy 
 
-                    for p in self.q1.parameters(): p.requires_grad = True
-                    for p in self.q2.parameters(): p.requires_grad = True
+                for p in self.q1.parameters(): p.requires_grad = True
+                for p in self.q2.parameters(): p.requires_grad = True
 
-                    # Entropy auto tune
-                    alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
-                    self.alpha_optim.zero_grad(set_to_none=True)
-                    alpha_loss.backward() 
-                    self.alpha_optim.step()
-                    alpha = self.log_alpha.exp()
+                # Entropy auto tune
+                alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
+                self.alpha_optim.zero_grad(set_to_none=True)
+                alpha_loss.backward() 
+                self.alpha_optim.step()
+                alpha = self.log_alpha.exp()
 
-                    if traj > 0 and traj % int(5e3) == 0 :
-                        self.n+=1
-                        self.save(self.n)
+                if traj > 0 and traj % int(5e3) == 0 :
+                    self.n+=1
+                    self.save(self.n)
 
-                    if traj > 0 and traj % int(1e3) == 0 :
-                        coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
+                if traj > 0 and traj % int(1e3) == 0 :
+                    coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
 
-                        mlflow.log_metrics(
-                            {
-                                "Main/collection rewards" : coll_reward,
-                                "Main/episodes rewards" : self.buffer.epi_reward.mean().item(),
+                    mlflow.log_metrics(
+                        {
+                            "Main/collection rewards" : coll_reward,
+                            "Main/episodes rewards" : self.buffer.epi_reward.mean().item(),
 
-                                "Main/entropy loss" : alpha_loss.item(),
-                                "Main/alpha value" : alpha.item(),
+                            "Main/entropy loss" : alpha_loss.item(),
+                            "Main/alpha value" : alpha.item(),
 
-                                "Norm/collection obs mean" : coll_obs_mean.item(),
-                                "Norm/collection obs std" : coll_obs_std.item(), 
-                                "Norm/training state mean" : states.mean().item(),
-                                "Norm/training state std" : states.std().item(),
-                                "Norm/training nx state mean" : nx_states.mean().item(),
-                                "Norm/training nx state std" : nx_states.std().item(),
+                            "Norm/collection obs mean" : coll_obs_mean.item(),
+                            "Norm/collection obs std" : coll_obs_std.item(), 
+                            "Norm/training state mean" : states.mean().item(),
+                            "Norm/training state std" : states.std().item(),
+                            "Norm/training nx state mean" : nx_states.mean().item(),
+                            "Norm/training nx state std" : nx_states.std().item(),
 
-                                "policy/log action" : (alpha * log_pi).mean().item(),
-                                "policy/pred min Q target" : min_q.mean().item(),
-                                "policy/policy loss action variance" : new_action.var().item(),
-                                "policy/loss Policy" : policy_loss.item(),
-                                "policy/action variance" : actions.var().item(),
+                            "policy/log action" : (alpha * log_pi).mean().item(),
+                            "policy/pred min Q target" : min_q.mean().item(),
+                            "policy/policy loss action variance" : new_action.var().item(),
+                            "policy/loss Policy" : policy_loss.item(),
+                            "policy/action variance" : actions.var().item(),
 
-                                "critic/log action" : (alpha * log_nx_actions).mean().item(),
-                                "critic/pred min Q target" : min_q_target.mean().item(),
-                                "critic/critic Loss" : critic_loss.item()
-                            },
-                            step = traj
-                        )
+                            "critic/log action" : (alpha * log_nx_actions).mean().item(),
+                            "critic/pred min Q target" : min_q_target.mean().item(),
+                            "critic/critic Loss" : critic_loss.item()
+                        },
+                        step = traj
+                    )
                         
 
-if __name__ == "__main__":
-    import warnings,logging
-    warnings.filterwarnings("ignore")
-    logging.disable(logging.CRITICAL)
-
+if __name__ == "__main__": 
+    mp.set_start_method("spawn",force=True)
     main(storage_path="./").train(True)
-    
+
