@@ -153,7 +153,7 @@ def create_storage():
 
 
 @torch.no_grad()
-def step(queue,policy,obs_rms): 
+def step(queue,policy): 
     env = vec_env()
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
@@ -161,12 +161,12 @@ def step(queue,policy,obs_rms):
     obs = torch.from_numpy(env.reset()[0])
 
     while True:
-        obs_rms.update(obs.numpy() if torch.is_tensor(obs) else obs) # tracking values for running stats
+        #obs_rms.update(obs.numpy() if torch.is_tensor(obs) else obs) # tracking values for running stats
 
         if pointer < hypers.warmup:
             action = env.action_space.sample()
         else:
-            norm_obs = normalize(obs,obs_rms)
+            #norm_obs = normalize(obs,obs_rms)
             action,_,_ = policy(obs)
             action = action.squeeze()
          
@@ -223,23 +223,36 @@ def sample(ep_queue,gpu_stream):
         global_idx += 1
         current_capacity = min(global_idx,n_batch)
         
-        if current_capacity < 10:
-            print(current_capacity,flush=True)
-            continue
+        #if current_capacity < 10:
+        #   continue
 
         idx_chunks = torch.randint(0, current_capacity, (hypers.batch_size,))
         idx_horizons = torch.randint(0, hypers.horizon, (hypers.batch_size,))
         idx_envs = torch.randint(0, hypers.num_envs, (hypers.batch_size,))
 
-        s_states = b_state[idx_chunks,idx_horizons,idx_envs].float()
-        s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs].float() 
-        s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].float().unsqueeze(-1)
-        s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].float().unsqueeze(-1)
-        s_actions = b_actions[idx_chunks,idx_horizons,idx_envs].float()
+        s_states = b_state[idx_chunks,idx_horizons,idx_envs]
+        s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs]
+        s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+        s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+        s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
 
         gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions))
-        print("heareeee --",flush=True)
-  
+
+
+
+def print_loading_bar(name,queue):
+    pbar = tqdm(total=queue._maxsize,desc=f"{name} batch") # tracking epsidoes queue size
+    while True:
+        pbar.n = queue.qsize()
+        pbar.refresh()
+        time.sleep(0.1)
+        if queue.full():
+            break
+    pbar.n = queue.qsize()
+    pbar.refresh()
+    pbar.close()
+
+
 
 class main:
     def __init__(self,storage_path):
@@ -261,7 +274,8 @@ class main:
         self.alpha_optim = Adam([self.log_alpha],lr=1e-6)
         
         self.storage_path = storage_path
-        self.n = 0 # tracking number for model data saving      
+        self.n = 0 # tracking number for model data saving  
+        self.obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
             
     
     def save(self,step):
@@ -292,41 +306,35 @@ class main:
             process__ = []
         
             for n in range(5):
-                obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
-                step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,obs_rms,),daemon=True)
+                step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,),daemon=True)
                 process__.append(step_thread)
                 step_thread.start()
-
-            pbar = tqdm(total=ep_queue._maxsize,desc="Warmup") # tracking epsidoes queue size
-            while True:
-                pbar.n = ep_queue.qsize()
-                pbar.refresh()
-                time.sleep(0.1)
-                if ep_queue.full():
-                    break
-        
+            print_loading_bar("episode",ep_queue)
+      
             for p in process__[5:]: # killing half of the processes to reduce memory consumption
                 p.terminate()
                 p.join()
             
-            batch_queue = mp.Queue(maxsize=10)
+            batch_queue = mp.Queue(maxsize=5)
             batch_process = mp.Process(target=sample,args=(ep_queue,batch_queue,),daemon=True)
             batch_process.start()
-            
-            pbar = tqdm(total=batch_queue._maxsize,desc="Warmup batch") # tracking epsidoes queue size
-            while True:
-                pbar.n = batch_queue.qsize()
-                pbar.refresh()
-                time.sleep(0.1)
-                if batch_queue.full():
-                    break
-        
+            print_loading_bar("batch",batch_queue)
+      
             alpha = self.log_alpha.exp() 
         
             for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
-                states,nx_states,reward,terminated,actions = self.buffer.sample(hypers.batchsize) 
-                states = self.normalize(states,self.buffer.obs_rms)
-                nx_states = self.normalize(nx_states,self.buffer.obs_rms)
+                states,nx_states,reward,terminated,actions = batch_queue.get()
+
+                states = states.to(hypers.device,dtype=torch.float)
+                nx_states = nx_states.to(hypers.device,dtype=torch.float)
+                reward = reward.to(hypers.device,dtype=torch.float)
+                terminated = terminated.to(hypers.device,dtype=torch.float)
+                actions = actions.to(hypers.device,dtype=torch.float)
+
+                self.obs_rms.update(states.cpu().numpy()) 
+
+                states = states.to(hypers.device,dtype=torch.float) # TODO: swtich to shared memory 
+                nx_states = nx_states.to(hypers.device,dtype=torch.float)
 
                 with torch.no_grad():
                     nx_actions,log_nx_actions,_ = self.actor(nx_states)
@@ -364,7 +372,7 @@ class main:
                 torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                 self.actor.optim.step()
 
-                if traj % 1000 : actor_cpu.load_state_dict(self.actor.state_dict()) # update cpu copy 
+                if traj > 0 and traj % 1000 : actor_cpu.load_state_dict(self.actor.state_dict()) # update cpu copy 
 
                 for p in self.q1.parameters(): p.requires_grad = True
                 for p in self.q2.parameters(): p.requires_grad = True
@@ -415,4 +423,4 @@ class main:
 if __name__ == "__main__": 
     mp.set_start_method("spawn",force=True)
     main(storage_path="./").train(True)
-
+    #print(torch.cuda.get_device_name(0))
