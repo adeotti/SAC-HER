@@ -5,7 +5,7 @@ logging.disable(logging.CRITICAL)
 import robosuite as suite
 from robosuite import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
-from gymnasium.vector import SyncVectorEnv,AutoresetMode
+from gymnasium.vector import SyncVectorEnv
 from gymnasium.wrappers.vector.stateful_observation import NormalizeObservation
 from gymnasium.wrappers.common import Autoreset
 
@@ -17,13 +17,11 @@ from torch.optim import Adam
 import numpy as np
 import torch.multiprocessing as mp
 
-from stable_baselines3.common.running_mean_std import RunningMeanStd
-from stable_baselines3.common.vec_env import VecNormalize
 from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
-from threading import Thread,Event
+from threading import Thread
 
 
 @dataclass(frozen=False)
@@ -60,7 +58,7 @@ env_configs = {
     }
 
 
-def vec_env():
+def vec_env(shared_mean,shared_var):
     def make_env():
         x = suite.make(env_name = "Stack",**env_configs)
         x = GymWrapper(x,list(x.observation_spec()))
@@ -70,6 +68,9 @@ def vec_env():
     
     env = SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
     env = NormalizeObservation(env)
+
+    env.obs_rms.mean = shared_mean.numpy() # critical for all the process launching differents instance to run the same statistics
+    env.obs_rms.var = shared_var.numpy()   # ...
     return env
 
 
@@ -96,7 +97,7 @@ class Actor(nn.Module):
 
     def forward(self,obs):
         x = F.silu(self.l1(obs))
-        x = F.silu(self.l2(x))
+        x = F.silu(self.l2(x))https://github.com/adeotti
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
@@ -131,13 +132,6 @@ class Critic(nn.Module):
         return x
 
 
-def normalize(obs,obs_rms:RunningMeanStd): # Welford's algorithm 
-    running_mean = torch.from_numpy(obs_rms.mean)
-    running_std = torch.from_numpy(obs_rms.var).sqrt()
-    output = (obs - running_mean ) / (running_std + 1e-8)
-    return output.clamp(-5,5) 
-
-
 def create_storage(): # storage for the step env method where episodes steps are stored
     obs_dim = (hypers.num_envs,hypers.obs_dim)     
     act_dim = (hypers.num_envs,hypers.action_dim)
@@ -151,8 +145,8 @@ def create_storage(): # storage for the step env method where episodes steps are
 
 
 @torch.no_grad()
-def step(queue,policy): # main method for stepping in the envs and collecting transitions 
-    env = vec_env()
+def step(queue,policy,mean,var): # main method for stepping in the envs and collecting transitions 
+    env = vec_env(shared_mean=mean,shared_var=var)
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
     reward__ = torch.zeros(hypers.num_envs)
@@ -220,7 +214,7 @@ def filler(buffer,ep_queue,mlflow_run_id): # method for filling the buffer
         current_capacity.copy_(torch.tensor(min(global_idx, n_batch.item())))
         
         mean_return = ep_rewards.sum().item() / hypers.num_envs # tracking rewards per episodes
-        mlflow.log_metric("Main/mean reward",mean_return,run_id=mlflow_run_id) 
+        mlflow.log_metric("Main/mean reward",mean_return,run_id=mlflow_run_id,step=global_idx) 
         
 
 def sampler(buffer,gpu_stream): # method for sampling from the buffer
@@ -282,7 +276,6 @@ class main:
         
         self.storage_path = storage_path
         self.n = 0 # tracking number for model data saving  
-        self.obs_rms = RunningMeanStd(shape=(hypers.obs_dim,))
             
     
     def save(self,step):
@@ -307,7 +300,7 @@ class main:
     def train(self,start=False):
         if start:
 
-            mlflow.set_experiment("SAC-LIFT-Robosuite")
+            mlflow.set_experiment("sac-lift-Robosuite")
             with mlflow.start_run() as run:
                 run_id = run.info.run_id 
 
@@ -316,9 +309,11 @@ class main:
                 
                 ep_queue = mp.Queue(maxsize=5) # 50 episode queue
                 process__ = []
+                shared_mean = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
+                shared_var = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
             
                 for n in range(5):
-                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,),daemon=True)
+                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,shared_mean,shared_var),daemon=True)
                     process__.append(step_thread)
                     step_thread.start()
 
@@ -345,14 +340,6 @@ class main:
                     reward = reward.to(hypers.device,dtype=torch.float)
                     terminated = terminated.to(hypers.device,dtype=torch.float)
                     actions = actions.to(hypers.device,dtype=torch.float)
-
-                    self.obs_rms.update(states.cpu().numpy())
-
-                    states = normalize(states.cpu(),self.obs_rms)
-                    nx_states = normalize(nx_states.cpu(),self.obs_rms)
-
-                    states = states.to(hypers.device,dtype=torch.float) # TODO: swtich to shared memory 
-                    nx_states = nx_states.to(hypers.device,dtype=torch.float)
 
                     with torch.no_grad():
                         nx_actions,log_nx_actions,_ = self.actor(nx_states)
