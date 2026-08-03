@@ -91,6 +91,7 @@ class Actor(nn.Module):
         self.l_mean = nn.Linear(512,hypers.action_dim)
         self.l_std = nn.Linear(512,hypers.action_dim)
         self.apply(weight_init)
+        self.optim = Adam(self.parameters(),hypers.lr)
 
     def forward(self,obs):
         x = F.silu(self.l1(obs))
@@ -187,8 +188,7 @@ def step(queue,policy): # main method for stepping in the envs and collecting tr
         if pointer == hypers.horizon:
             data = (stor_curr_states.clone(),stor_nx_states.clone(),stor_rewards.clone(),stor_terminated.clone(),stor_actions.clone())
             queue.put(data)
-            pointer = 0
-            reward__.mean() # TODO log mean()
+            pointer = 0 
             stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
             reward_ = torch.zeros(hypers.num_envs)
 
@@ -206,13 +206,13 @@ def create_buffer(): # buffer storage where many episode are stored for random s
     return (n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity)
 
 
-def filler(buffer,ep_queue): # method for filling the buffer
+def filler(buffer,ep_queue,mlflow_run_id): # method for filling the buffer
     n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
     global_idx = 0
 
     while True: 
         ep_curr_state,ep_nx_state,ep_rewards,ep_terminated,ep_actions = ep_queue.get()
-    
+            
         p = global_idx % n_batch.item()
 
         b_state[p].copy_(ep_curr_state)
@@ -223,7 +223,10 @@ def filler(buffer,ep_queue): # method for filling the buffer
         
         global_idx += 1
         current_capacity.copy_(torch.tensor(min(global_idx, n_batch.item())))
-
+        
+        mean_return = ep_rewards.sum().item() / hypers.num_envs # tracking rewards per episodes
+        mlflow.log_metric("Main/mean reward",mean_return,run_id=mlflow_run_id) 
+        
 
 def sampler(buffer,gpu_stream): # method for sampling from the buffer
     n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
@@ -252,7 +255,7 @@ def sampler(buffer,gpu_stream): # method for sampling from the buffer
 def print_queue_loading(queue): # tracking queue size mainly during warmup phase
     pbar = tqdm(total=queue._maxsize,desc="Warmup")
     while True:
-        pbar.n = ep_queue.qsize()
+        pbar.n = queue.qsize()
         pbar.refresh()
         time.sleep(0.1)
         if queue.qsize() == queue._maxsize:
@@ -308,125 +311,130 @@ class main:
 
     def train(self,start=False):
         if start:
-            actor_cpu = Actor()
-            actor_cpu.share_memory()
-            
-            ep_queue = mp.Queue(maxsize=5) # 50 episode queue
-            process__ = []
-        
-            for n in range(5):
-                step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,),daemon=True)
-                process__.append(step_thread)
-                step_thread.start()
 
-            print_queue_loading(ep_queue)
-            
-            buffer = create_buffer() # init and share memory of tensors in buffer 
-            for tensor in buffer : 
-                tensor.share_memory_()
+            mlflow.set_experiment("SAC-LIFT-Robosuite")
+            with mlflow.start_run() as run:
+                run_id = run.info.run_id 
 
-            batch_queue = mp.Queue(maxsize=100)
-            filler_thread = Thread(target=filler,args=(buffer,ep_queue,),daemon=True)
-            filler_thread.start()
-
-            sampler_thread = Thread(target=sampler,args=(buffer,batch_queue,),daemon=True)
-            sampler_thread.start()
-       
-            alpha = self.log_alpha.exp() 
-        
-            for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
-                states,nx_states,reward,terminated,actions = batch_queue.get()
-
-                states = states.to(hypers.device,dtype=torch.float)
-                nx_states = nx_states.to(hypers.device,dtype=torch.float)
-                reward = reward.to(hypers.device,dtype=torch.float)
-                terminated = terminated.to(hypers.device,dtype=torch.float)
-                actions = actions.to(hypers.device,dtype=torch.float)
-
-                self.obs_rms.update(states.cpu().numpy())
-
-                states = normalize(states.cpu(),self.obs_rms)
-                nx_states = normalize(nx_states.cpu(),self.obs_rms)
-
-                states = states.to(hypers.device,dtype=torch.float) # TODO: swtich to shared memory 
-                nx_states = nx_states.to(hypers.device,dtype=torch.float)
-
-                with torch.no_grad():
-                    nx_actions,log_nx_actions,_ = self.actor(nx_states)
-                    min_q_target = torch.min(
-                        self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
-                    )
-                    q_target = reward + hypers.gamma * (1-terminated) * (min_q_target - alpha * log_nx_actions)
-                    # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
-
-                q1_pred = self.q1(states,actions) 
-                q2_pred = self.q2(states,actions) 
-                critic_loss = F.mse_loss(q1_pred,q_target) 
-                critic_loss += F.mse_loss(q2_pred,q_target)
-
-                self.critic_optim.zero_grad(set_to_none=True)
-                critic_loss.backward()
-                torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
-                self.critic_optim.step()
-
-                for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
-                    q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
-            
-                for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
-                    q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
+                actor_cpu = Actor()
+                actor_cpu.share_memory()
                 
-                for p in self.q1.parameters() : p.requires_grad = False
-                for p in self.q2.parameters() : p.requires_grad = False
+                ep_queue = mp.Queue(maxsize=5) # 50 episode queue
+                process__ = []
+            
+                for n in range(5):
+                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,),daemon=True)
+                    process__.append(step_thread)
+                    step_thread.start()
 
-                new_action,log_pi,_ = self.actor(states)
-                min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
-                policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
+                print_queue_loading(ep_queue)
                 
-                self.actor.optim.zero_grad(set_to_none=True)
-                policy_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
-                self.actor.optim.step()
+                buffer = create_buffer() # init and share memory of tensors in buffer 
+                for tensor in buffer : 
+                    tensor.share_memory_()
 
-                if traj > 0 and traj % 1000 : # update cpu copy after some gradients steps
-                    actor_cpu.load_state_dict(self.actor.state_dict()) 
+                batch_queue = mp.Queue(maxsize=100)
+                filler_thread = Thread(target=filler,args=(buffer,ep_queue,run_id,),daemon=True)
+                filler_thread.start()
 
-                for p in self.q1.parameters(): p.requires_grad = True
-                for p in self.q2.parameters(): p.requires_grad = True
-
-                # Entropy auto tune --
-                alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
-                self.alpha_optim.zero_grad(set_to_none=True)
-                alpha_loss.backward() 
-                self.alpha_optim.step()
+                sampler_thread = Thread(target=sampler,args=(buffer,batch_queue,),daemon=True)
+                sampler_thread.start()
+           
                 alpha = self.log_alpha.exp()
+ 
+                for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
+                    states,nx_states,reward,terminated,actions = batch_queue.get()
 
-                if traj > 0 and traj % int(5e3) == 0 :
-                    self.n+=1
-                    self.save(self.n)
+                    states = states.to(hypers.device,dtype=torch.float)
+                    nx_states = nx_states.to(hypers.device,dtype=torch.float)
+                    reward = reward.to(hypers.device,dtype=torch.float)
+                    terminated = terminated.to(hypers.device,dtype=torch.float)
+                    actions = actions.to(hypers.device,dtype=torch.float)
 
-                if traj > 0 and traj % int(1e3) == 0 :
-                    mlflow.log_metrics(
-                        {
-                            "Main/entropy loss" : alpha_loss.item(),
-                            "Main/alpha value" : alpha.item(),
+                    self.obs_rms.update(states.cpu().numpy())
 
-                            "Norm/training state mean" : states.mean().item(),
-                            "Norm/training state std" : states.std().item(),
-                            "Norm/training nx state mean" : nx_states.mean().item(),
-                            "Norm/training nx state std" : nx_states.std().item(),
+                    states = normalize(states.cpu(),self.obs_rms)
+                    nx_states = normalize(nx_states.cpu(),self.obs_rms)
 
-                            "policy/log action" : (alpha * log_pi).mean().item(),
-                            "policy/pred min Q target" : min_q.mean().item(),
-                            "policy/policy loss action variance" : new_action.var().item(),
-                            "policy/loss Policy" : policy_loss.item(),
-                            "policy/action variance" : actions.var().item(),
+                    states = states.to(hypers.device,dtype=torch.float) # TODO: swtich to shared memory 
+                    nx_states = nx_states.to(hypers.device,dtype=torch.float)
 
-                            "critic/log action" : (alpha * log_nx_actions).mean().item(),
-                            "critic/pred min Q target" : min_q_target.mean().item(),
-                            "critic/critic Loss" : critic_loss.item()
-                        },
-                        step = traj
-                    )
+                    with torch.no_grad():
+                        nx_actions,log_nx_actions,_ = self.actor(nx_states)
+                        min_q_target = torch.min(
+                            self.q1_target(nx_states,nx_actions),self.q2_target(nx_states,nx_actions)
+                        )
+                        q_target = reward + hypers.gamma * (1-terminated) * (min_q_target - alpha * log_nx_actions)
+                        # target = reward(st|at) + gamma * Q(st,at) - alpha * log policy(at|st))
+
+                    q1_pred = self.q1(states,actions) 
+                    q2_pred = self.q2(states,actions) 
+                    critic_loss = F.mse_loss(q1_pred,q_target) 
+                    critic_loss += F.mse_loss(q2_pred,q_target)
+
+                    self.critic_optim.zero_grad(set_to_none=True)
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(chain(self.q1.parameters(),self.q2.parameters()),1.0)
+                    self.critic_optim.step()
+
+                    for q1_pars,q1_target_pars in zip(self.q1.parameters(),self.q1_target.parameters()):
+                        q1_target_pars.data.mul_(1.0 - hypers.tau).add_(q1_pars.data,alpha=hypers.tau)
+                
+                    for q2_pars,q2_target_pars in zip(self.q2.parameters(),self.q2_target.parameters()):
+                        q2_target_pars.data.mul_(1.0 - hypers.tau).add_(q2_pars.data,alpha=hypers.tau)
+                    
+                    for p in self.q1.parameters() : p.requires_grad = False
+                    for p in self.q2.parameters() : p.requires_grad = False
+
+                    new_action,log_pi,_ = self.actor(states)
+                    min_q = torch.min(self.q1(states,new_action),self.q2(states,new_action))
+                    policy_loss = ((alpha.detach() * log_pi) -  min_q).mean() # alpla * log policy(at|st) - Q(st,at)
+                    
+                    self.actor.optim.zero_grad(set_to_none=True)
+                    policy_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
+                    self.actor.optim.step()
+
+                    if traj > 0 and traj % 1000 == 0 : # update cpu copy after some gradients steps
+                        actor_cpu.load_state_dict(self.actor.state_dict()) 
+
+                    for p in self.q1.parameters(): p.requires_grad = True
+                    for p in self.q2.parameters(): p.requires_grad = True
+
+                    # Entropy auto tune --
+                    alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
+                    self.alpha_optim.zero_grad(set_to_none=True)
+                    alpha_loss.backward() 
+                    self.alpha_optim.step()
+                    alpha = self.log_alpha.exp()
+
+                    if traj > 0 and traj % int(5e3) == 0 :
+                        self.n+=1
+                        self.save(self.n)
+
+                    if traj > 0 and traj % int(1e3) == 0 :
+                        mlflow.log_metrics(
+                            {
+                                "Main/entropy loss" : alpha_loss.item(),
+                                "Main/alpha value" : alpha.item(),
+
+                                "Norm/training state mean" : states.mean().item(),
+                                "Norm/training state std" : states.std().item(),
+                                "Norm/training nx state mean" : nx_states.mean().item(),
+                                "Norm/training nx state std" : nx_states.std().item(),
+
+                                "policy/log action" : (alpha * log_pi).mean().item(),
+                                "policy/pred min Q target" : min_q.mean().item(),
+                                "policy/policy loss action variance" : new_action.var().item(),
+                                "policy/loss Policy" : policy_loss.item(),
+                                "policy/action variance" : actions.var().item(),
+
+                                "critic/log action" : (alpha * log_nx_actions).mean().item(),
+                                "critic/pred min Q target" : min_q_target.mean().item(),
+                                "critic/critic Loss" : critic_loss.item()
+                            },
+                            step = traj
+                        )
                         
 
 if __name__ == "__main__": 
