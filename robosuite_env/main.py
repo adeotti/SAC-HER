@@ -117,18 +117,13 @@ class Critic(nn.Module):
         self.l2 = nn.Linear(512,512)
         self.l3 = nn.Linear(512,512)
         self.output = nn.Linear(512,1)
-
-        self.ln1 = nn.LayerNorm(512)
-        self.ln2 = nn.LayerNorm(512)
-        self.ln3 = nn.LayerNorm(512)
-        self.dropout = nn.Dropout(0.01)
         self.apply(weight_init) 
 
-    def forward(self,obs,action): # TODO update forward
+    def forward(self,obs,action): 
         cat = torch.cat((obs,action),dim=-1)
-        x = F.silu(self.ln1(self.dropout(self.l1(cat))))
-        x = F.silu(self.ln2(self.dropout(self.l2(x))))
-        x = F.silu(self.ln3(self.dropout(self.l3(x))))
+        x = F.silu(self.l1(cat))
+        x = F.silu(self.l2(x))
+        x = F.silu(self.l3(x))
         x = self.output(x)
         return x
 
