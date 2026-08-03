@@ -97,7 +97,7 @@ class Actor(nn.Module):
 
     def forward(self,obs):
         x = F.silu(self.l1(obs))
-        x = F.silu(self.l2(x))https://github.com/adeotti
+        x = F.silu(self.l2(x))
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
