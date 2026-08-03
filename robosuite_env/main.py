@@ -74,10 +74,6 @@ def vec_env(shared_mean,shared_var):
     return env
 
 
-def vec_nom_env():
-    env = vec_env
-    env = VecNormalize(evnv,norm_obs=True)
-
 def weight_init(l):
     if isinstance(l,nn.Linear):
         nn.init.orthogonal_(l.weight)
@@ -149,11 +145,11 @@ def step(queue,policy,mean,var): # main method for stepping in the envs and coll
     env = vec_env(shared_mean=mean,shared_var=var)
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
-    reward__ = torch.zeros(hypers.num_envs)
+    global_step = 0
     obs = torch.from_numpy(env.reset()[0])
 
     while True:
-        if pointer < hypers.warmup:
+        if global_step < hypers.warmup:
             action = env.action_space.sample()
         else:
             action,_,_ = policy(obs)
@@ -161,8 +157,6 @@ def step(queue,policy,mean,var): # main method for stepping in the envs and coll
          
         nx_state,reward,done,terminated,info = env.step(action.tolist())
         
-        reward__ += reward
-
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
         
         stor_curr_states[pointer].copy_(torch.as_tensor(obs))
@@ -172,20 +166,20 @@ def step(queue,policy,mean,var): # main method for stepping in the envs and coll
         stor_actions[pointer].copy_(saved_action)
 
         obs = nx_state
-        pointer+=1     
+        pointer+=1
+        global_step += 1
      
         if pointer == hypers.horizon:
             data = (stor_curr_states.clone(),stor_nx_states.clone(),stor_rewards.clone(),stor_terminated.clone(),stor_actions.clone())
             queue.put(data)
             pointer = 0 
             stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
-            reward_ = torch.zeros(hypers.num_envs)
 
     env.close()
 
 
 def create_buffer(): # buffer storage where many episode are stored for random sampling later
-    n_batch = torch.tensor(5) 
+    n_batch = torch.tensor(100) 
     b_state = torch.zeros((n_batch,hypers.horizon,hypers.num_envs,162),dtype=torch.half)
     b_nx_state = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,162,dtype=torch.half)
     b_rewards = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.half)
@@ -221,24 +215,21 @@ def sampler(buffer,gpu_stream): # method for sampling from the buffer
     n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
  
     while True:
-        if current_capacity.item() < 5:
+        if current_capacity.item() < 20:
             time.sleep(0.1)
             continue
 
-        for n in range(100):
-            idx_chunks = torch.randint(0,current_capacity,(hypers.batch_size,))
-            idx_horizons = torch.randint(0,hypers.horizon,(hypers.batch_size,))
-            idx_envs = torch.randint(0,hypers.num_envs,(hypers.batch_size,))
+        idx_chunks = torch.randint(0,current_capacity,(hypers.batch_size,))
+        idx_horizons = torch.randint(0,hypers.horizon,(hypers.batch_size,))
+        idx_envs = torch.randint(0,hypers.num_envs,(hypers.batch_size,))
 
-            s_states = b_state[idx_chunks,idx_horizons,idx_envs]
-            s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs]
-            s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
-            s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
-            s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
-            try:
-                gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions),timeout=10.0)
-            except queue.Full:
-                continue
+        s_states = b_state[idx_chunks,idx_horizons,idx_envs]
+        s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs]
+        s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+        s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+        s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
+    
+        gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions),timeout=10.0)
 
 
 def print_queue_loading(queue): # tracking queue size mainly during warmup phase
@@ -290,9 +281,8 @@ class main:
             "alpha optim":self.alpha_optim.state_dict(),
             "log_alpha":self.log_alpha,
 
-            "obs_rms_mean":self.obs_rms.mean,
-            "obs_rms_var":self.obs_rms.var,
-            "obs_rms_count":self.obs_rms.count
+            "obs_rms_mean": self.shared_mean.cpu(), 
+            "obs_rms_var": self.shared_var.cpu()
         }
         torch.save(check,f"{self.storage_path}{step}.pth")
 
@@ -307,13 +297,13 @@ class main:
                 actor_cpu = Actor()
                 actor_cpu.share_memory()
                 
-                ep_queue = mp.Queue(maxsize=5) # 50 episode queue
+                ep_queue = mp.Queue(maxsize=50) # 50 episode queue
                 process__ = []
-                shared_mean = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
-                shared_var = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
+                self.shared_mean = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
+                self.shared_var = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
             
                 for n in range(5):
-                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,shared_mean,shared_var),daemon=True)
+                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,self.shared_mean,self.shared_var,),daemon=True)
                     process__.append(step_thread)
                     step_thread.start()
 
@@ -390,7 +380,7 @@ class main:
                     self.alpha_optim.step()
                     alpha = self.log_alpha.exp()
 
-                    if traj > 0 and traj % int(5e3) == 0 :
+                    if traj > 0 and traj % int(10e3) == 0 :
                         self.n+=1
                         self.save(self.n)
 
