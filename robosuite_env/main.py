@@ -6,10 +6,8 @@ import robosuite as suite
 from robosuite import load_composite_controller_config
 from robosuite.wrappers.gym_wrapper import GymWrapper
 from gymnasium.vector import SyncVectorEnv,AutoresetMode
-try:
-    from gymnasium.wrappers import AutoResetWrapper
-except ImportError:
-    from gymnasium.wrappers import Autoreset
+from gymnasium.wrappers.vector.stateful_observation import NormalizeObservation
+from gymnasium.wrappers.common import Autoreset
 
 import torch,sys,time,mlflow,queue
 import torch.nn.functional as F
@@ -20,6 +18,7 @@ import numpy as np
 import torch.multiprocessing as mp
 
 from stable_baselines3.common.running_mean_std import RunningMeanStd
+from stable_baselines3.common.vec_env import VecNormalize
 from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
@@ -66,15 +65,17 @@ def vec_env():
         x = suite.make(env_name = "Stack",**env_configs)
         x = GymWrapper(x,list(x.observation_spec()))
         x.metadata = {"render_mode":[]}
-        try:
-            x = Autoreset(x)
-        except NameError:
-            x = AutoResetWrapper(x)
+        x = Autoreset(x)
         return x
-    return SyncVectorEnv([make_env for _ in range(hypers.num_envs)],
-            autoreset_mode=AutoresetMode.SAME_STEP
-    )
+    
+    env = SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
+    env = NormalizeObservation(env)
+    return env
 
+
+def vec_nom_env():
+    env = vec_env
+    env = VecNormalize(evnv,norm_obs=True)
 
 def weight_init(l):
     if isinstance(l,nn.Linear):
@@ -167,17 +168,11 @@ def step(queue,policy): # main method for stepping in the envs and collecting tr
         nx_state,reward,done,terminated,info = env.step(action.tolist())
         
         reward__ += reward
-        if np.all(done):
-            last_obs = list(info.get("final_obs")) 
-            buffer_nx_state = torch.from_numpy(np.stack(last_obs))
-            reward__ *= 0
-        else:
-            buffer_nx_state = nx_state
 
         saved_action = (torch.from_numpy(np.array(action)) if isinstance(action,np.ndarray) else action)
         
         stor_curr_states[pointer].copy_(torch.as_tensor(obs))
-        stor_nx_states[pointer].copy_(torch.as_tensor(buffer_nx_state))
+        stor_nx_states[pointer].copy_(torch.as_tensor(nx_state))
         stor_rewards[pointer].copy_(torch.from_numpy(reward))
         stor_terminated[pointer].copy_(torch.from_numpy(terminated))
         stor_actions[pointer].copy_(saved_action)
