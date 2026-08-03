@@ -91,7 +91,6 @@ class Actor(nn.Module):
         self.l_mean = nn.Linear(512,hypers.action_dim)
         self.l_std = nn.Linear(512,hypers.action_dim)
         self.apply(weight_init)
-        self.optim = Adam(self.parameters(),hypers.lr)
 
     def forward(self,obs):
         x = F.silu(self.l1(obs))
@@ -99,7 +98,9 @@ class Actor(nn.Module):
         x = F.silu(self.l3(x))
         
         mean = self.l_mean(x)
-        std = self.l_std(x).clamp(-2,2).exp()
+        log_std = self.l_std(x)
+        log_std = torch.clamp(log_std,-20,2)
+        std = log_std.exp()
         dist = Normal(mean,std) 
         
         pre_tanh = dist.rsample()
@@ -107,7 +108,7 @@ class Actor(nn.Module):
         log = dist.log_prob(pre_tanh)
         log -= torch.log(1-action.pow(2) + 1e-8) # change of variable correction 
         log = log.sum(-1,True)  
-        return action,log,mean
+        return action,log,torch.tanh(mean)
     
 
 class Critic(nn.Module):
@@ -302,7 +303,7 @@ class main:
             "obs_rms_var":self.obs_rms.var,
             "obs_rms_count":self.obs_rms.count
         }
-        torch.save(check,f"{self.storage_path}{step}")
+        torch.save(check,f"{self.storage_path}{step}.pth")
 
 
     def train(self,start=False):
