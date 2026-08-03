@@ -1,5 +1,4 @@
-import warnings
-import logging
+import warnings,logging
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
 
@@ -12,7 +11,7 @@ try:
 except ImportError:
     from gymnasium.wrappers import Autoreset
 
-import torch,sys,time,mlflow
+import torch,sys,time,mlflow,queue
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.distributions import Normal
@@ -25,6 +24,7 @@ from copy import deepcopy
 from tqdm import tqdm
 from itertools import chain
 from dataclasses import dataclass
+from threading import Thread,Event
 
 
 @dataclass(frozen=False)
@@ -34,7 +34,7 @@ class Hypers:
     device = torch.device("cuda:0")
     obs_dim = 162       # observation space, dim -1  
     action_dim = 9      # action space for a single env
-    batch_size =  32 #1024
+    batch_size = 1024
     lr = 3e-4
     gamma = .99
     tau = .005
@@ -133,14 +133,14 @@ class Critic(nn.Module):
         return x
 
 
-def normalize(obs,obs_rms:RunningMeanStd): # Welford's algorithm with no update
+def normalize(obs,obs_rms:RunningMeanStd): # Welford's algorithm 
     running_mean = torch.from_numpy(obs_rms.mean)
     running_std = torch.from_numpy(obs_rms.var).sqrt()
     output = (obs - running_mean ) / (running_std + 1e-8)
     return output.clamp(-5,5) 
 
 
-def create_storage():
+def create_storage(): # storage for the step env method where episodes steps are stored
     obs_dim = (hypers.num_envs,hypers.obs_dim)     
     act_dim = (hypers.num_envs,hypers.action_dim)
     return (
@@ -153,7 +153,7 @@ def create_storage():
 
 
 @torch.no_grad()
-def step(queue,policy): 
+def step(queue,policy): # main method for stepping in the envs and collecting transitions 
     env = vec_env()
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
@@ -161,12 +161,9 @@ def step(queue,policy):
     obs = torch.from_numpy(env.reset()[0])
 
     while True:
-        #obs_rms.update(obs.numpy() if torch.is_tensor(obs) else obs) # tracking values for running stats
-
         if pointer < hypers.warmup:
             action = env.action_space.sample()
         else:
-            #norm_obs = normalize(obs,obs_rms)
             action,_,_ = policy(obs)
             action = action.squeeze()
          
@@ -192,27 +189,35 @@ def step(queue,policy):
         pointer+=1     
      
         if pointer == hypers.horizon:
-            data = (stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions)
+            data = (stor_curr_states.clone(),stor_nx_states.clone(),stor_rewards.clone(),stor_terminated.clone(),stor_actions.clone())
             queue.put(data)
             pointer = 0
             reward__.mean() # TODO log mean()
             stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
             reward_ = torch.zeros(hypers.num_envs)
 
+    env.close()
 
-def sample(ep_queue,gpu_stream):
-    n_batch = 50
+
+def create_buffer(): # buffer storage where many episode are stored for random sampling later
+    n_batch = torch.tensor(5) 
     b_state = torch.zeros((n_batch,hypers.horizon,hypers.num_envs,162),dtype=torch.half)
     b_nx_state = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,162,dtype=torch.half)
     b_rewards = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.half)
     b_terminated = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.bool)
     b_actions = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,9,dtype=torch.half)
+    current_capacity = torch.tensor(0)
+    return (n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity)
+
+
+def filler(buffer,ep_queue): # method for filling the buffer
+    n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
     global_idx = 0
-    
-    while True:
+
+    while True: 
         ep_curr_state,ep_nx_state,ep_rewards,ep_terminated,ep_actions = ep_queue.get()
-        
-        p = global_idx % n_batch
+    
+        p = global_idx % n_batch.item()
 
         b_state[p].copy_(ep_curr_state)
         b_nx_state[p].copy_(ep_nx_state)
@@ -221,32 +226,40 @@ def sample(ep_queue,gpu_stream):
         b_actions[p].copy_(ep_actions)
         
         global_idx += 1
-        current_capacity = min(global_idx,n_batch)
-        
-        #if current_capacity < 10:
-        #   continue
-
-        idx_chunks = torch.randint(0, current_capacity, (hypers.batch_size,))
-        idx_horizons = torch.randint(0, hypers.horizon, (hypers.batch_size,))
-        idx_envs = torch.randint(0, hypers.num_envs, (hypers.batch_size,))
-
-        s_states = b_state[idx_chunks,idx_horizons,idx_envs]
-        s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs]
-        s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
-        s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
-        s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
-
-        gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions))
+        current_capacity.copy_(torch.tensor(min(global_idx, n_batch.item())))
 
 
-
-def print_loading_bar(name,queue):
-    pbar = tqdm(total=queue._maxsize,desc=f"{name} batch") # tracking epsidoes queue size
+def sampler(buffer,gpu_stream): # method for sampling from the buffer
+    n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
+ 
     while True:
-        pbar.n = queue.qsize()
+        if current_capacity.item() < 5:
+            time.sleep(0.1)
+            continue
+
+        for n in range(100):
+            idx_chunks = torch.randint(0,current_capacity,(hypers.batch_size,))
+            idx_horizons = torch.randint(0,hypers.horizon,(hypers.batch_size,))
+            idx_envs = torch.randint(0,hypers.num_envs,(hypers.batch_size,))
+
+            s_states = b_state[idx_chunks,idx_horizons,idx_envs]
+            s_nx_state = b_nx_state[idx_chunks,idx_horizons,idx_envs]
+            s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+            s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
+            s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
+            try:
+                gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions),timeout=10.0)
+            except queue.Full:
+                continue
+
+
+def print_queue_loading(queue): # tracking queue size mainly during warmup phase
+    pbar = tqdm(total=queue._maxsize,desc="Warmup")
+    while True:
+        pbar.n = ep_queue.qsize()
         pbar.refresh()
         time.sleep(0.1)
-        if queue.full():
+        if queue.qsize() == queue._maxsize:
             break
     pbar.n = queue.qsize()
     pbar.refresh()
@@ -290,9 +303,9 @@ class main:
             "alpha optim":self.alpha_optim.state_dict(),
             "log_alpha":self.log_alpha,
 
-            "obs_rms_mean":self.buffer.obs_rms.mean,
-            "obs_rms_var":self.buffer.obs_rms.var,
-            "obs_rms_count":self.buffer.obs_rms.count
+            "obs_rms_mean":self.obs_rms.mean,
+            "obs_rms_var":self.obs_rms.var,
+            "obs_rms_count":self.obs_rms.count
         }
         torch.save(check,f"{self.storage_path}{step}")
 
@@ -309,17 +322,20 @@ class main:
                 step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,),daemon=True)
                 process__.append(step_thread)
                 step_thread.start()
-            print_loading_bar("episode",ep_queue)
-      
-            for p in process__[5:]: # killing half of the processes to reduce memory consumption
-                p.terminate()
-                p.join()
+
+            print_queue_loading(ep_queue)
             
-            batch_queue = mp.Queue(maxsize=5)
-            batch_process = mp.Process(target=sample,args=(ep_queue,batch_queue,),daemon=True)
-            batch_process.start()
-            print_loading_bar("batch",batch_queue)
-      
+            buffer = create_buffer() # init and share memory of tensors in buffer 
+            for tensor in buffer : 
+                tensor.share_memory_()
+
+            batch_queue = mp.Queue(maxsize=100)
+            filler_thread = Thread(target=filler,args=(buffer,ep_queue,),daemon=True)
+            filler_thread.start()
+
+            sampler_thread = Thread(target=sampler,args=(buffer,batch_queue,),daemon=True)
+            sampler_thread.start()
+       
             alpha = self.log_alpha.exp() 
         
             for traj in tqdm(range(hypers.max_steps + 1),total=hypers.max_steps + 1):
@@ -331,7 +347,10 @@ class main:
                 terminated = terminated.to(hypers.device,dtype=torch.float)
                 actions = actions.to(hypers.device,dtype=torch.float)
 
-                self.obs_rms.update(states.cpu().numpy()) 
+                self.obs_rms.update(states.cpu().numpy())
+
+                states = normalize(states.cpu(),self.obs_rms)
+                nx_states = normalize(nx_states.cpu(),self.obs_rms)
 
                 states = states.to(hypers.device,dtype=torch.float) # TODO: swtich to shared memory 
                 nx_states = nx_states.to(hypers.device,dtype=torch.float)
@@ -372,12 +391,13 @@ class main:
                 torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                 self.actor.optim.step()
 
-                if traj > 0 and traj % 1000 : actor_cpu.load_state_dict(self.actor.state_dict()) # update cpu copy 
+                if traj > 0 and traj % 1000 : # update cpu copy after some gradients steps
+                    actor_cpu.load_state_dict(self.actor.state_dict()) 
 
                 for p in self.q1.parameters(): p.requires_grad = True
                 for p in self.q2.parameters(): p.requires_grad = True
 
-                # Entropy auto tune
+                # Entropy auto tune --
                 alpha_loss = -(self.log_alpha*(log_pi+self.entropy_target).detach()).mean()
                 self.alpha_optim.zero_grad(set_to_none=True)
                 alpha_loss.backward() 
@@ -389,18 +409,11 @@ class main:
                     self.save(self.n)
 
                 if traj > 0 and traj % int(1e3) == 0 :
-                    coll_obs_mean,coll_obs_std,coll_reward = self.buffer.utils()
-
                     mlflow.log_metrics(
                         {
-                            "Main/collection rewards" : coll_reward,
-                            "Main/episodes rewards" : self.buffer.epi_reward.mean().item(),
-
                             "Main/entropy loss" : alpha_loss.item(),
                             "Main/alpha value" : alpha.item(),
 
-                            "Norm/collection obs mean" : coll_obs_mean.item(),
-                            "Norm/collection obs std" : coll_obs_std.item(), 
                             "Norm/training state mean" : states.mean().item(),
                             "Norm/training state std" : states.std().item(),
                             "Norm/training nx state mean" : nx_states.mean().item(),
@@ -422,5 +435,5 @@ class main:
 
 if __name__ == "__main__": 
     mp.set_start_method("spawn",force=True)
+    mp.set_sharing_strategy("file_system")
     main(storage_path="./").train(True)
-    #print(torch.cuda.get_device_name(0))
