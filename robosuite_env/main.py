@@ -29,21 +29,21 @@ class Hypers:
     ROBOT = "Panda"
     env_name = None
     device = torch.device("cuda:0")
-    obs_dim = 162       # observation space, dim -1  
-    action_dim = 9      # action space for a single env
+    obs_dim = 136      # observation space, dim -1 ,162 for stack 
+    action_dim = 9     # action space for a single env 
     batch_size = 1024
     lr = 3e-4
     gamma = .99
     tau = .005
-    warmup = 5000
-    max_steps = int(5e6)
+    warmup = 2000
+    max_steps = int(10e6)
     num_envs = 10
     horizon = 500
     buffer_size = int(1e5)
 
 hypers = Hypers()
     
-cont_config = load_composite_controller_config(robot=hypers.ROBOT)
+cont_config = controller = load_composite_controller_config(robot=hypers.ROBOT)
 env_configs = {
     "robots":"Panda",
     "controller_configs": cont_config,
@@ -54,13 +54,12 @@ env_configs = {
     "reward_shaping":True,             # Dense rewards env version 
     "horizon":hypers.horizon,          # Max steps before reset or trunc = True
     "control_freq":20,
-    "reward_scale":10.0
+    "reward_scale":1.0
     }
 
-
-def vec_env(shared_mean,shared_var):
+def vec_env():
     def make_env():
-        x = suite.make(env_name = "Stack",**env_configs)
+        x = suite.make(env_name = "Lift",**env_configs) # Lift
         x = GymWrapper(x,list(x.observation_spec()))
         x.metadata = {"render_mode":[]}
         x = Autoreset(x)
@@ -68,9 +67,6 @@ def vec_env(shared_mean,shared_var):
     
     env = SyncVectorEnv([make_env for _ in range(hypers.num_envs)])
     env = NormalizeObservation(env)
-
-    env.obs_rms.mean = shared_mean.numpy() # critical for all the process launching differents instance to run the same statistics
-    env.obs_rms.var = shared_var.numpy()   # ...
     return env
 
 
@@ -141,8 +137,8 @@ def create_storage(): # storage for the step env method where episodes steps are
 
 
 @torch.no_grad()
-def step(queue,policy,mean,var): # main method for stepping in the envs and collecting transitions 
-    env = vec_env(shared_mean=mean,shared_var=var)
+def step(queue,policy,mean,var,stat_logger=False): # main method for stepping in the envs and collecting transitions 
+    env = vec_env()
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
     global_step = 0
@@ -152,7 +148,7 @@ def step(queue,policy,mean,var): # main method for stepping in the envs and coll
         if global_step < hypers.warmup:
             action = env.action_space.sample()
         else:
-            action,_,_ = policy(obs)
+            action,_,_ = policy(torch.as_tensor(obs))
             action = action.squeeze()
          
         nx_state,reward,done,terminated,info = env.step(action.tolist())
@@ -168,23 +164,27 @@ def step(queue,policy,mean,var): # main method for stepping in the envs and coll
         obs = nx_state
         pointer+=1
         global_step += 1
-     
+
         if pointer == hypers.horizon:
             data = (stor_curr_states.clone(),stor_nx_states.clone(),stor_rewards.clone(),stor_terminated.clone(),stor_actions.clone())
             queue.put(data)
             pointer = 0 
             stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
 
+            # tracking mean and variance
+            mean.copy_(torch.from_numpy(env.obs_rms.mean))
+            var.copy_(torch.from_numpy(env.obs_rms.var))
+
     env.close()
 
 
 def create_buffer(): # buffer storage where many episode are stored for random sampling later
     n_batch = torch.tensor(100) 
-    b_state = torch.zeros((n_batch,hypers.horizon,hypers.num_envs,162),dtype=torch.half)
-    b_nx_state = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,162,dtype=torch.half)
+    b_state = torch.zeros((n_batch,hypers.horizon,hypers.num_envs,hypers.obs_dim),dtype=torch.half)
+    b_nx_state = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,hypers.obs_dim,dtype=torch.half)
     b_rewards = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.half)
     b_terminated = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,dtype=torch.bool)
-    b_actions = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,9,dtype=torch.half)
+    b_actions = torch.zeros(n_batch,hypers.horizon,hypers.num_envs,hypers.action_dim,dtype=torch.half)
     current_capacity = torch.tensor(0)
     return (n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity)
 
@@ -215,7 +215,7 @@ def sampler(buffer,gpu_stream): # method for sampling from the buffer
     n_batch,b_state,b_nx_state,b_rewards,b_terminated,b_actions,current_capacity = buffer
  
     while True:
-        if current_capacity.item() < 20:
+        if current_capacity.item() < 50:
             time.sleep(0.1)
             continue
 
@@ -228,8 +228,11 @@ def sampler(buffer,gpu_stream): # method for sampling from the buffer
         s_reward = b_rewards[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
         s_terminated = b_terminated[idx_chunks,idx_horizons,idx_envs].unsqueeze(-1)
         s_actions = b_actions[idx_chunks,idx_horizons,idx_envs]
-    
-        gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions),timeout=10.0)
+        
+        try:
+            gpu_stream.put((s_states,s_nx_state,s_reward,s_terminated,s_actions),timeout=1.0)
+        except queue.Full:
+            continue
 
 
 def print_queue_loading(queue): # tracking queue size mainly during warmup phase
@@ -255,15 +258,17 @@ class main:
         self.q1_target = deepcopy(self.q1).to(hypers.device)
         self.q2_target = deepcopy(self.q2).to(hypers.device)
 
-        self.actor.compile()
+        self.actor.compile(mode="max-autotune")
         self.q1.compile()
         self.q2.compile()
+        self.q1_target.compile()
+        self.q2_target.compile()
 
-        self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=hypers.lr,fused=True)
+        self.critic_optim = Adam(chain(self.q1.parameters(),self.q2.parameters()),lr=1e-6,fused=True)
 
         self.entropy_target = -hypers.action_dim
         self.log_alpha = torch.tensor(1.0,requires_grad=True,device=hypers.device)  
-        self.alpha_optim = Adam([self.log_alpha],lr=1e-6)
+        self.alpha_optim = Adam([self.log_alpha],lr=hypers.lr)
         
         self.storage_path = storage_path
         self.n = 0 # tracking number for model data saving  
@@ -301,9 +306,14 @@ class main:
                 process__ = []
                 self.shared_mean = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
                 self.shared_var = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
-            
+        
                 for n in range(5):
-                    step_thread = mp.Process(target=step,args=(ep_queue,actor_cpu,self.shared_mean,self.shared_var,),daemon=True)
+                    step_thread = mp.Process(
+                        target=step,
+                        args=(ep_queue,actor_cpu,self.shared_mean,self.shared_var,),
+                        kwargs = {"stat_logger": n==0},
+                        daemon=True
+                    )
                     process__.append(step_thread)
                     step_thread.start()
 
@@ -367,7 +377,7 @@ class main:
                     torch.nn.utils.clip_grad_norm_(self.actor.parameters(),1.0)
                     self.actor.optim.step()
 
-                    if traj > 0 and traj % 1000 == 0 : # update cpu copy after some gradients steps
+                    if traj > 0 and traj % 50 == 0 : # update cpu copy after some gradients steps
                         actor_cpu.load_state_dict(self.actor.state_dict()) 
 
                     for p in self.q1.parameters(): p.requires_grad = True
@@ -380,7 +390,7 @@ class main:
                     self.alpha_optim.step()
                     alpha = self.log_alpha.exp()
 
-                    if traj > 0 and traj % int(10e3) == 0 :
+                    if traj > 0 and traj % int(20e3) == 0 :
                         self.n+=1
                         self.save(self.n)
 
@@ -389,12 +399,7 @@ class main:
                             {
                                 "Main/entropy loss" : alpha_loss.item(),
                                 "Main/alpha value" : alpha.item(),
-
-                                "Norm/training state mean" : states.mean().item(),
-                                "Norm/training state std" : states.std().item(),
-                                "Norm/training nx state mean" : nx_states.mean().item(),
-                                "Norm/training nx state std" : nx_states.std().item(),
-
+                              
                                 "policy/log action" : (alpha * log_pi).mean().item(),
                                 "policy/pred min Q target" : min_q.mean().item(),
                                 "policy/policy loss action variance" : new_action.var().item(),
