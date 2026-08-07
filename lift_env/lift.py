@@ -137,7 +137,7 @@ def create_storage(): # storage for the step env method where episodes steps are
 
 
 @torch.no_grad()
-def step(queue,policy,mean,var,stat_logger=False): # main method for stepping in the envs and collecting transitions 
+def step(queue,policy,mean,var,count,stat_logger=False): # main method for stepping in the envs and collecting transitions 
     env = vec_env()
     stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()     
     pointer = 0
@@ -171,9 +171,10 @@ def step(queue,policy,mean,var,stat_logger=False): # main method for stepping in
             pointer = 0 
             stor_curr_states,stor_nx_states,stor_rewards,stor_terminated,stor_actions = create_storage()
 
-            # tracking mean and variance
-            mean.copy_(torch.from_numpy(env.obs_rms.mean))
-            var.copy_(torch.from_numpy(env.obs_rms.var))
+            if stat_logger:# tracking mean and variance
+                mean.copy_(torch.from_numpy(env.obs_rms.mean))
+                var.copy_(torch.from_numpy(env.obs_rms.var))
+                count.copy_(torch.as_tensor(env.obs_rms.count))
 
     env.close()
 
@@ -287,9 +288,28 @@ class main:
             "log_alpha":self.log_alpha,
 
             "obs_rms_mean": self.shared_mean.cpu(), 
-            "obs_rms_var": self.shared_var.cpu()
+            "obs_rms_var": self.shared_var.cpu(),
+            "obs_rms_count" : self.shared_count.cpu()
         }
         torch.save(check,f"{self.storage_path}{step}.pth")
+
+    
+    def load(self,model_path = None,strict=True):
+        if model_path is not None:
+            check = torch.load(model_path,weights_only=False,map_location=hypers.device)
+            self.actor.load_state_dict(check["actor state"],strict)
+            self.actor.optim.load_state_dict(check["actor optim"])
+            self.q1.load_state_dict(check["q1 state"],strict)
+            self.q1_target.load_state_dict(check["q1 target"],strict)
+            self.q2.load_state_dict(check["q2 state"],strict)
+            self.q2_target.load_state_dict(check["q2 target"],strict)
+            self.critic_optim.load_state_dict(check["critic optim"])
+            self.log_alpha.data.copy_(check["log_alpha"].data)
+            self.alpha_optim.load_state_dict(check["alpha optim"])
+            # env statistics
+            self.shared_mean = check["obs_rms_mean"]
+            self.shared_var = check["obs_rms_var"]
+            self.shared_count = check["obs_rms_count"]
 
 
     def train(self,start=False):
@@ -297,20 +317,23 @@ class main:
 
             mlflow.set_experiment("sac-lift-Robosuite")
             with mlflow.start_run() as run:
-                run_id = run.info.run_id 
+                run_id = run.info.run_id
 
+                self.load(model_path=None)
                 actor_cpu = Actor()
+                actor_cpu.load_state_dict(self.actor.state_dict()) # importand when resuming with a pretrained model
                 actor_cpu.share_memory()
                 
                 ep_queue = mp.Queue(maxsize=50) # 50 episode queue
                 process__ = []
                 self.shared_mean = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
                 self.shared_var = torch.zeros(hypers.obs_dim,dtype=torch.float).share_memory_()
+                self.shared_count = torch.zeros(1,dtype=torch.float).share_memory_()
         
                 for n in range(5):
                     step_thread = mp.Process(
                         target=step,
-                        args=(ep_queue,actor_cpu,self.shared_mean,self.shared_var,),
+                        args=(ep_queue,actor_cpu,self.shared_mean,self.shared_var,self.shared_count),
                         kwargs = {"stat_logger": n==0},
                         daemon=True
                     )
